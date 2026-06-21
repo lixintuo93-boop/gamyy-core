@@ -384,10 +384,10 @@ git config --global user.name "lixintuo93-boop"
 git config --global user.email "lixintuo93@gmail.com"
 
 # 3. 生成 SSH Key
-ssh-keygen -t ed25519 -C "lixintuo93@gmail.com" -f ~/.ssh/id_ed25519_github
+ssh-keygen -t ed25519 -C "lixintuo93@gmail.com"
 
 # 4. 复制公钥，添加到 GitHub
-cat ~/.ssh/id_ed25519_github.pub
+type %USERPROFILE%\.ssh\id_ed25519.pub
 # 打开 https://github.com/settings/ssh/new
 # 粘贴 → Add SSH Key
 
