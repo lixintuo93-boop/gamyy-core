@@ -1,241 +1,270 @@
 @echo off
-setlocal enabledelayedexpansion
-
 cd /d "%~dp0"
+title gamyy-core
 
 echo ============================================
-echo   gamyy-core Setup ^& Launch
+echo   gamyy-core
 echo ============================================
 echo.
 
 REM ============================================================
-REM  1. Find or install Node.js
+REM  Step 1: Find or install Node.js
 REM ============================================================
-echo [1/5] Checking Node.js...
-set "NODE_EXE="
-set "NODE_DIR="
+set "NODE_CMD="
 
-REM 1a. Try node on PATH
-call :try_path node.exe
-if "!NODE_EXE!"=="" call :try_path node
+REM --- Check if node works on PATH ---
+node -v >nul 2>&1
+if errorlevel 1 goto :node_not_on_path
 
-REM 1b. Try common install directories
-if "!NODE_EXE!"=="" (
-    for %%d in (
-        "C:\Program Files\nodejs"
-        "C:\Program Files (x86)\nodejs"
-    ) do (
+REM Node is on PATH; capture version
+for /f "tokens=*" %%v in ('node -v 2^>nul') do set "NODE_VER=%%v"
+set "NODE_CMD=node"
+echo [OK] Node.js !NODE_VER! ^(on PATH^)
+goto :node_done
+
+:node_not_on_path
+REM --- Check common install directories ---
+echo Node.js not on PATH. Searching...
+for %%d in (
+    "C:\Program Files\nodejs"
+    "C:\Program Files (x86)\nodejs"
+) do (
+    if not defined NODE_CMD (
         if exist "%%~d\node.exe" (
-            set "NODE_EXE=%%~d\node.exe"
-            set "NODE_DIR=%%~d"
+            for /f "tokens=*" %%v in ('"%%~d\node.exe" -v 2^>nul') do set "NODE_VER=%%v"
+            set "NODE_CMD=%%~d\node.exe"
+            echo [OK] Node.js !NODE_VER! ^(%%~d^)
         )
     )
 )
 
-REM 1c. Check version if found
-if not "!NODE_EXE!"=="" (
-    call :check_node_version
-)
-
-REM 1d. Install if missing
-if "!NODE_EXE!"=="" (
-    call :install_nodejs
-    if errorlevel 1 (
-        pause
-        exit /b 1
-    )
-)
-
-echo     Node.js version: !NODE_VER!
-echo.
-
-REM ============================================================
-REM  2. Locate npm
-REM ============================================================
-echo [2/5] Checking npm...
-set "NPM_EXE="
-if not "!NODE_DIR!"=="" (
-    if exist "!NODE_DIR!\npm.cmd" set "NPM_EXE=!NODE_DIR!\npm.cmd"
-    if exist "!NODE_DIR!\npm"    set "NPM_EXE=!NODE_DIR!\npm"
-)
-if "!NPM_EXE!"=="" call :try_path npm.cmd
-if "!NPM_EXE!"=="" call :try_path npm
-if "!NPM_EXE!"=="" set "NPM_EXE=npm"
-
-echo     npm: !NPM_EXE!
-echo.
-
-REM ============================================================
-REM  3. Install or rebuild dependencies
-REM ============================================================
-echo [3/5] Checking dependencies...
-
-if not exist "node_modules" (
-    echo     node_modules missing, running npm install...
+REM --- Still not found? Install ---
+if not defined NODE_CMD (
     echo.
-    call "!NPM_EXE!" install --omit=dev --legacy-peer-deps
+    echo Node.js not found. Installing Node.js 22 LTS...
+    echo.
+    call :do_install
     if errorlevel 1 (
         echo.
-        echo     [ERROR] npm install failed. Check network or try:
-        echo             npm config set registry https://registry.npmmirror.com
-        echo             then re-run run.bat
+        echo [FAIL] Installation failed.
+        echo Install Node.js 22 from: https://nodejs.org/en/download
+        echo Then re-run run.bat
+        echo.
+        pause
+        exit /b 1
+    )
+)
+
+:node_done
+echo.
+echo Node: !NODE_VER!
+echo Path: !NODE_CMD!
+
+REM ============================================================
+REM  Step 2: Find npm (same directory as node.exe)
+REM ============================================================
+for %%d in ("!NODE_CMD!") do set "NODE_DIR=%%~dpd"
+
+if exist "!NODE_DIR!\npm.cmd" (
+    set "NPM_CMD=!NODE_DIR!\npm.cmd"
+) else if exist "!NODE_DIR!\npm" (
+    set "NPM_CMD=!NODE_DIR!\npm"
+) else (
+    REM Fallback: hope npm is on PATH
+    set "NPM_CMD=npm"
+)
+
+for /f "tokens=*" %%v in ('"!NPM_CMD!" -v 2^>nul') do set "NPM_VER=%%v"
+echo [OK] npm: !NPM_VER! ^(!NPM_CMD!^)
+echo.
+
+REM ============================================================
+REM  Step 3: Dependencies
+REM ============================================================
+echo [3/5] Dependencies...
+if not exist "node_modules" (
+    echo Installing dependencies...
+    echo.
+    call "!NPM_CMD!" install --omit=dev --legacy-peer-deps
+    if errorlevel 1 (
+        echo.
+        echo [FAIL] npm install failed.
+        echo Try: npm config set registry https://registry.npmmirror.com
+        echo Then re-run run.bat
+        echo.
         pause
         exit /b 1
     )
     echo.
+    echo [OK] Dependencies installed.
 ) else (
-    echo     node_modules exists, checking native modules...
-    call "!NPM_EXE!" rebuild better-sqlite3 sqlite3 >nul 2>&1
+    echo [OK] node_modules exists.
+    call "!NPM_CMD!" rebuild better-sqlite3 sqlite3 >nul 2>&1
 )
-
 echo.
 
 REM ============================================================
-REM  4. Check port
+REM  Step 4: Port check
 REM ============================================================
-echo [4/5] Checking port 3000...
-set "PORT_BUSY=0"
-netstat -ano 2>nul | findstr ":3000 " | findstr "LISTENING" >nul
-if not errorlevel 1 (
-    set "PORT_BUSY=1"
-    echo     [WARN] Port 3000 is already in use:
-    netstat -ano 2>nul | findstr ":3000 " | findstr "LISTENING"
+echo [4/5] Port 3000...
+netstat -ano 2>nul | find ":3000" | find "LISTENING" >nul
+if errorlevel 1 (
+    echo [OK] Port 3000 available.
 ) else (
-    echo     Port 3000 is available
-)
-
-echo.
-
-REM ============================================================
-REM  5. Launch
-REM ============================================================
-if "!PORT_BUSY!"=="1" (
-    echo     Port 3000 is busy. Stop the existing process first.
-    echo     Or change port in config before starting.
+    echo [WARN] Port 3000 is in use:
+    netstat -ano 2>nul | find ":3000" | find "LISTENING"
+    echo.
+    echo Stop the existing process or change port in config.
+    echo.
     pause
     exit /b 1
 )
-
-echo [5/5] Starting gamyy-core...
-echo.
-echo ============================================
-echo   gamyy-core Web Management Service
-echo   URL:  http://localhost:3000
-echo   Press Ctrl+C to stop.
-echo ============================================
 echo.
 
-"!NODE_EXE!" web/server.js
+REM ============================================================
+REM  Step 5: Launch
+REM ============================================================
+echo [5/5] Starting...
+echo.
+echo ============================================
+echo   URL: http://localhost:3000
+echo   Press Ctrl+C to stop
+echo ============================================
+echo.
+
+"!NODE_CMD!" web/server.js
 
 echo.
 echo Service stopped.
 pause
-endlocal
 exit /b 0
 
 
 REM ============================================================
-REM  SUBROUTINES
+REM  Install Node.js subroutine
 REM ============================================================
+:do_install
 
-:try_path
-REM Usage: call :try_path <executable_name>
-REM Sets NODE_EXE if found and valid
-set "_TRY=%1"
-for /f "delims=" %%p in ('where "!_TRY!" 2^>nul') do (
-    if "!NODE_EXE!"=="" (
-        set "NODE_EXE=%%p"
-    )
-)
-exit /b
+REM --- Try winget ---
+winget --version >nul 2>&1
+if errorlevel 1 goto :install_msi
 
-:check_node_version
-REM Uses NODE_EXE; sets NODE_VER and clears NODE_EXE if too old
-set "NODE_VER=unknown"
-for /f "tokens=*" %%v in ('"!NODE_EXE!" -v 2^>nul') do set "NODE_VER=%%v"
-set "NODE_VER_NUM=!NODE_VER:v=!"
-for /f "tokens=1 delims=." %%a in ("!NODE_VER_NUM!") do set "NODE_MAJOR=%%a"
-if !NODE_MAJOR! LSS 18 (
-    echo     Node.js !NODE_VER! too old (need ^>= 18)
-    set "NODE_EXE="
-)
-exit /b
+echo Trying winget...
 
-:install_nodejs
-echo     Node.js not found, installing...
+REM Uninstall any partial Node.js first (clean slate)
+winget uninstall --id OpenJS.NodeJS.LTS --source winget --silent >nul 2>&1
 
-REM Try winget first (with explicit --source to avoid msstore cert issue)
-call :try_path winget.exe
-if not "!NODE_EXE!"=="" set "HAS_WINGET=1"
-set "NODE_EXE="
+winget install --id OpenJS.NodeJS.LTS --source winget --silent --accept-source-agreements --accept-package-agreements
+if errorlevel 1 goto :install_msi
 
-if "!HAS_WINGET!"=="1" (
-    echo     Installing via winget...
-    winget install --id OpenJS.NodeJS.LTS --source winget --silent --accept-source-agreements --accept-package-agreements
-    if not errorlevel 1 (
-        REM Success; locate node.exe
-        for %%d in (
-            "C:\Program Files\nodejs"
-            "C:\Program Files (x86)\nodejs"
-        ) do (
-            if exist "%%~d\node.exe" (
-                if "!NODE_EXE!"=="" (
-                    set "NODE_EXE=%%~d\node.exe"
-                    set "NODE_DIR=%%~d"
-                )
-            )
-        )
-        if not "!NODE_EXE!"=="" (
-            call :check_node_version
-            if not "!NODE_EXE!"=="" exit /b 0
-        )
-    )
-    echo     winget failed, trying MSI download...
-    set "HAS_WINGET=0"
-)
+REM Wait a moment for install to finish
+echo Waiting for install to complete...
+timeout /t 10 /nobreak >nul
 
-if "!HAS_WINGET!"=="0" (
-    echo     Downloading Node.js 22 LTS MSI...
-    set "MSI_URL=https://nodejs.org/dist/v22.14.0/node-v22.14.0-x64.msi"
-    set "MSI_PATH=%TEMP%\node-v22.14.0-x64.msi"
-
-    powershell -Command "Invoke-WebRequest -Uri '!MSI_URL!' -OutFile '!MSI_PATH!'" 2>nul
-    if not exist "!MSI_PATH!" (
-        curl -L --fail -o "!MSI_PATH!" "!MSI_URL!" 2>nul
-    )
-
-    if not exist "!MSI_PATH!" (
-        echo     [ERROR] Download failed.
-        echo     Install Node.js 22 LTS from: https://nodejs.org/en/download
-        echo     Then re-run run.bat
-        exit /b 1
-    )
-
-    echo     Running silent install (may take a minute)...
-    msiexec /i "!MSI_PATH!" /qn /norestart 2>nul
-    if errorlevel 1 msiexec /i "!MSI_PATH!" 2>nul
-    del "!MSI_PATH!" 2>nul
-
-    REM Locate installed node.exe
-    for %%d in (
-        "C:\Program Files\nodejs"
-        "C:\Program Files (x86)\nodejs"
-    ) do (
+REM Locate node.exe
+for %%d in (
+    "C:\Program Files\nodejs"
+    "C:\Program Files (x86)\nodejs"
+) do (
+    if not defined NODE_CMD (
         if exist "%%~d\node.exe" (
-            if "!NODE_EXE!"=="" (
-                set "NODE_EXE=%%~d\node.exe"
-                set "NODE_DIR=%%~d"
-            )
+            set "NODE_CMD=%%~d\node.exe"
         )
     )
 )
 
-if "!NODE_EXE!"=="" (
-    echo     [ERROR] Could not find node.exe after install.
-    echo     Install Node.js 22 LTS from: https://nodejs.org/en/download
-    echo     Then re-run run.bat
+if defined NODE_CMD (
+    for /f "tokens=*" %%v in ('"!NODE_CMD!" -v 2^>nul') do set "NODE_VER=%%v"
+    echo [OK] winget installed Node.js !NODE_VER!
+    exit /b 0
+)
+
+echo winget completed but node.exe not found at expected paths.
+echo Checking %ProgramFiles%\nodejs...
+
+REM Try one more time after a longer wait
+timeout /t 10 /nobreak >nul
+dir "C:\Program Files\nodejs" 2>nul
+for %%d in (
+    "C:\Program Files\nodejs"
+    "C:\Program Files (x86)\nodejs"
+) do (
+    if not defined NODE_CMD (
+        if exist "%%~d\node.exe" (
+            set "NODE_CMD=%%~d\node.exe"
+        )
+    )
+)
+
+if defined NODE_CMD (
+    for /f "tokens=*" %%v in ('"!NODE_CMD!" -v 2^>nul') do set "NODE_VER=%%v"
+    echo [OK] Found Node.js !NODE_VER!
+    exit /b 0
+)
+
+echo winget succeeded but cannot locate node.exe.
+goto :install_msi
+
+
+:install_msi
+echo Downloading Node.js 22 LTS installer...
+set "MSI_URL=https://nodejs.org/dist/v22.14.0/node-v22.14.0-x64.msi"
+set "MSI_FILE=%TEMP%\nodejs-installer.msi"
+
+REM Delete old download if exists
+del "%MSI_FILE%" 2>nul
+
+REM Try PowerShell first, then curl
+echo Trying PowerShell download...
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%MSI_URL%' -OutFile '%MSI_FILE%' -UseBasicParsing" 2>nul
+
+if not exist "%MSI_FILE%" (
+    echo Trying curl...
+    curl -L -o "%MSI_FILE%" "%MSI_URL%" 2>nul
+)
+
+if not exist "%MSI_FILE%" (
+    echo.
+    echo [FAIL] Could not download Node.js installer.
+    echo Download manually from: https://nodejs.org/en/download
+    echo Save to: %MSI_FILE%
+    echo Then re-run run.bat
+    echo.
     exit /b 1
 )
 
-call :check_node_version
-exit /b 0
+echo Running installer...
+msiexec /i "%MSI_FILE%" /qn /norestart 2>nul
+if errorlevel 1 (
+    echo Silent mode failed, launching GUI installer...
+    msiexec /i "%MSI_FILE%"
+    echo.
+    echo After installation completes, re-run run.bat
+    echo.
+    pause
+)
+
+REM Clean up
+del "%MSI_FILE%" 2>nul
+
+REM Locate node.exe
+for %%d in (
+    "C:\Program Files\nodejs"
+    "C:\Program Files (x86)\nodejs"
+) do (
+    if not defined NODE_CMD (
+        if exist "%%~d\node.exe" (
+            set "NODE_CMD=%%~d\node.exe"
+        )
+    )
+)
+
+if defined NODE_CMD (
+    for /f "tokens=*" %%v in ('"!NODE_CMD!" -v 2^>nul') do set "NODE_VER=%%v"
+    echo [OK] Node.js !NODE_VER! installed.
+    exit /b 0
+)
+
+echo [FAIL] Installed but cannot find node.exe.
+echo Look in: "C:\Program Files\nodejs"
+exit /b 1
