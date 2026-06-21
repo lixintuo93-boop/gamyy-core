@@ -80,6 +80,11 @@ if exist "!NODE_DIR!\npm.cmd" (
 
 for /f "tokens=*" %%v in ('"!NPM_CMD!" -v 2^>nul') do set "NPM_VER=%%v"
 echo [OK] npm: !NPM_VER! ^(!NPM_CMD!^)
+
+REM --- Ensure node directory is on PATH (required for node-gyp native builds) ---
+if defined NODE_DIR (
+    set "PATH=!NODE_DIR!;%PATH%"
+)
 echo.
 
 REM ============================================================
