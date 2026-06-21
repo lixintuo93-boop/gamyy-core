@@ -375,9 +375,9 @@ bash deploy.sh --restart-only
 ### 6.1 全新的 Windows 电脑
 
 ```bash
-# 1. 安装 Git
-# 下载地址：https://git-scm.com/download/win
-# 安装时选择 "Use Git from Git Bash"
+# 1. 安装 Git（CMD 中执行，无需打开浏览器）
+winget install --id Git.Git -e --source winget
+# 安装完成后关闭当前 CMD，重新打开即可使用 git
 
 # 2. 配置 Git 用户信息
 git config --global user.name "lixintuo93-boop"
