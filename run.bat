@@ -17,10 +17,13 @@ REM --- Check if node works on PATH ---
 node -v >nul 2>&1
 if errorlevel 1 goto :node_not_on_path
 
-REM Node is on PATH; capture version
+REM Node is on PATH; resolve full path so we can find npm next to it
 for /f "tokens=*" %%v in ('node -v 2^>nul') do set "NODE_VER=%%v"
-set "NODE_CMD=node"
-echo [OK] Node.js !NODE_VER! ^(on PATH^)
+for /f "tokens=*" %%p in ('where node 2^>nul') do (
+    if "!NODE_CMD!"=="" set "NODE_CMD=%%p"
+)
+if "!NODE_CMD!"=="" set "NODE_CMD=node"
+echo [OK] Node.js !NODE_VER! ^(!NODE_CMD!^)
 goto :node_done
 
 :node_not_on_path
