@@ -15,20 +15,27 @@ set "NODE_CMD="
 
 REM --- Check if node works on PATH ---
 node -v >nul 2>&1
-if errorlevel 1 goto :node_not_on_path
+if errorlevel 1 goto :node_search_dirs
 
-REM Node is on PATH; resolve full path so we can find npm next to it
+REM Node is on PATH; capture version and full path
 for /f "tokens=*" %%v in ('node -v 2^>nul') do set "NODE_VER=%%v"
 for /f "tokens=*" %%p in ('where node 2^>nul') do (
     if "!NODE_CMD!"=="" set "NODE_CMD=%%p"
 )
 if "!NODE_CMD!"=="" set "NODE_CMD=node"
-echo [OK] Node.js !NODE_VER! ^(!NODE_CMD!^)
-goto :node_done
 
-:node_not_on_path
-REM --- Check common install directories ---
-echo Node.js not on PATH. Searching...
+REM Check major version: only accept 22.x (better-sqlite3 prebuilt for 22)
+set "NODE_VER_NUM=!NODE_VER:v=!"
+for /f "tokens=1 delims=." %%a in ("!NODE_VER_NUM!") do set "NODE_MAJOR=%%a"
+if !NODE_MAJOR! EQU 22 (
+    echo [OK] Node.js !NODE_VER! ^(!NODE_CMD!^)
+    goto :node_done
+)
+echo [SKIP] Node.js !NODE_VER! found but need v22, will install 22...
+
+:node_search_dirs
+REM --- Check common install directories for v22 ---
+echo Searching for Node.js 22...
 for %%d in (
     "C:\Program Files\nodejs"
     "C:\Program Files (x86)\nodejs"
@@ -36,16 +43,23 @@ for %%d in (
     if not defined NODE_CMD (
         if exist "%%~d\node.exe" (
             for /f "tokens=*" %%v in ('"%%~d\node.exe" -v 2^>nul') do set "NODE_VER=%%v"
-            set "NODE_CMD=%%~d\node.exe"
-            echo [OK] Node.js !NODE_VER! ^(%%~d^)
+            set "NODE_VER_NUM=!NODE_VER:v=!"
+            for /f "tokens=1 delims=." %%a in ("!NODE_VER_NUM!") do set "NODE_MAJOR=%%a"
+            if !NODE_MAJOR! EQU 22 (
+                set "NODE_CMD=%%~d\node.exe"
+                set "NODE_DIR=%%~d"
+                echo [OK] Node.js !NODE_VER! ^(%%~d^)
+            ) else (
+                echo [SKIP] Found Node !NODE_VER! at %%~d, need v22
+            )
         )
     )
 )
 
-REM --- Still not found? Install ---
+REM --- Not found v22? Install ---
 if not defined NODE_CMD (
     echo.
-    echo Node.js not found. Installing Node.js 22 LTS...
+    echo Node.js 22 LTS not found. Installing...
     echo.
     call :do_install
     if errorlevel 1 (
@@ -65,49 +79,67 @@ echo Node: !NODE_VER!
 echo Path: !NODE_CMD!
 
 REM ============================================================
-REM  Step 2: Find npm (same directory as node.exe)
+REM  Step 2: Find npm and fix PATH
 REM ============================================================
-for %%d in ("!NODE_CMD!") do set "NODE_DIR=%%~dpd"
 
+REM Derive node directory (if not already set by :node_search_dirs)
+if not defined NODE_DIR (
+    for %%d in ("!NODE_CMD!") do set "NODE_DIR=%%~dpd"
+)
+
+REM Add node dir to PATH NOW (before npm runs so node-gyp can find node)
+if defined NODE_DIR (
+    set "PATH=!NODE_DIR!;%PATH%"
+    echo PATH updated: !NODE_DIR! added
+)
+
+REM Locate npm next to node.exe
 if exist "!NODE_DIR!\npm.cmd" (
     set "NPM_CMD=!NODE_DIR!\npm.cmd"
 ) else if exist "!NODE_DIR!\npm" (
     set "NPM_CMD=!NODE_DIR!\npm"
 ) else (
-    REM Fallback: hope npm is on PATH
     set "NPM_CMD=npm"
 )
 
 for /f "tokens=*" %%v in ('"!NPM_CMD!" -v 2^>nul') do set "NPM_VER=%%v"
 echo [OK] npm: !NPM_VER! ^(!NPM_CMD!^)
-
-REM --- Ensure node directory is on PATH (required for node-gyp native builds) ---
-if defined NODE_DIR (
-    set "PATH=!NODE_DIR!;%PATH%"
-)
 echo.
 
 REM ============================================================
 REM  Step 3: Dependencies
 REM ============================================================
 echo [3/5] Dependencies...
+
+REM If previous install was broken (better-sqlite3 crash), clean up
+if exist "node_modules" (
+    if exist "node_modules\.package-lock.json" (
+        echo     Checking node_modules health...
+        call "!NODE_CMD!" -e "try{require('better-sqlite3')}catch(e){process.exit(1)}" >nul 2>&1
+        if errorlevel 1 (
+            echo     [WARN] better-sqlite3 broken, cleaning node_modules...
+            rmdir /s /q node_modules >nul 2>&1
+        )
+    )
+)
+
 if not exist "node_modules" (
-    echo Installing dependencies...
+    echo     Installing dependencies...
     echo.
     call "!NPM_CMD!" install --omit=dev --legacy-peer-deps
     if errorlevel 1 (
         echo.
-        echo [FAIL] npm install failed.
-        echo Try: npm config set registry https://registry.npmmirror.com
-        echo Then re-run run.bat
+        echo     [FAIL] npm install failed.
+        echo     Try: npm config set registry https://registry.npmmirror.com
+        echo     Then re-run run.bat
         echo.
         pause
         exit /b 1
     )
     echo.
-    echo [OK] Dependencies installed.
+    echo     [OK] Dependencies installed.
 ) else (
-    echo [OK] node_modules exists.
+    echo     [OK] node_modules exists.
     call "!NPM_CMD!" rebuild better-sqlite3 sqlite3 >nul 2>&1
 )
 echo.
@@ -154,71 +186,12 @@ REM  Install Node.js subroutine
 REM ============================================================
 :do_install
 
-REM --- Try winget ---
-winget --version >nul 2>&1
-if errorlevel 1 goto :install_msi
-
-echo Trying winget...
-
-REM Uninstall any partial Node.js first (clean slate)
-winget uninstall --id OpenJS.NodeJS.LTS --source winget --silent >nul 2>&1
-
-winget install --id OpenJS.NodeJS.LTS --source winget --silent --accept-source-agreements --accept-package-agreements
-if errorlevel 1 goto :install_msi
-
-REM Wait a moment for install to finish
-echo Waiting for install to complete...
-timeout /t 10 /nobreak >nul
-
-REM Locate node.exe
-for %%d in (
-    "C:\Program Files\nodejs"
-    "C:\Program Files (x86)\nodejs"
-) do (
-    if not defined NODE_CMD (
-        if exist "%%~d\node.exe" (
-            set "NODE_CMD=%%~d\node.exe"
-        )
-    )
-)
-
-if defined NODE_CMD (
-    for /f "tokens=*" %%v in ('"!NODE_CMD!" -v 2^>nul') do set "NODE_VER=%%v"
-    echo [OK] winget installed Node.js !NODE_VER!
-    exit /b 0
-)
-
-echo winget completed but node.exe not found at expected paths.
-echo Checking %ProgramFiles%\nodejs...
-
-REM Try one more time after a longer wait
-timeout /t 10 /nobreak >nul
-dir "C:\Program Files\nodejs" 2>nul
-for %%d in (
-    "C:\Program Files\nodejs"
-    "C:\Program Files (x86)\nodejs"
-) do (
-    if not defined NODE_CMD (
-        if exist "%%~d\node.exe" (
-            set "NODE_CMD=%%~d\node.exe"
-        )
-    )
-)
-
-if defined NODE_CMD (
-    for /f "tokens=*" %%v in ('"!NODE_CMD!" -v 2^>nul') do set "NODE_VER=%%v"
-    echo [OK] Found Node.js !NODE_VER!
-    exit /b 0
-)
-
-echo winget succeeded but cannot locate node.exe.
-goto :install_msi
-
+REM === Always prefer MSI for guaranteed Node 22 LTS ===
 
 :install_msi
 echo Downloading Node.js 22 LTS installer...
 set "MSI_URL=https://nodejs.org/dist/v22.14.0/node-v22.14.0-x64.msi"
-set "MSI_FILE=%TEMP%\nodejs-installer.msi"
+set "MSI_FILE=%TEMP%\node-v22.14.0-x64.msi"
 
 REM Delete old download if exists
 del "%MSI_FILE%" 2>nul
@@ -264,6 +237,7 @@ for %%d in (
     if not defined NODE_CMD (
         if exist "%%~d\node.exe" (
             set "NODE_CMD=%%~d\node.exe"
+            set "NODE_DIR=%%~d"
         )
     )
 )
