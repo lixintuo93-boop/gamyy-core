@@ -15,6 +15,11 @@ frontend/node_modules/
 data/*.bak
 data/*.backup
 
+# === SQLite 运行时临时文件（WAL/回滚模式，运行时自动生成）===
+data/*.db-shm
+data/*.db-wal
+data/*.db-journal
+
 # === 操作系统 ===
 .DS_Store
 Thumbs.db

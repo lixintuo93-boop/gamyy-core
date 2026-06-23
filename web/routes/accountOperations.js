@@ -11,6 +11,16 @@ const C = require('../../account/constants');
 
 const router = Router();
 
+// 与 RegisterService._uuid / AccountCreator._uuid 保持一致：
+// 标准 RFC4122 v4 模板，带连字符；uppercase=true 全大写，false 全小写。
+function _uuid(uppercase = true) {
+  const u = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+  return uppercase ? u.toUpperCase() : u;
+}
+
 function getService() {
   return new AccountOperationService(getDb());
 }
@@ -79,8 +89,8 @@ router.post('/add-manual', (req, res) => {
           if (existing) throw new Error('手机号已存在');
 
           const isAndroid  = platform === 'android';
-          const uuid       = crypto.randomUUID().replace(/-/g, '').toUpperCase();
-          const deviceId   = isAndroid ? uuid.toLowerCase() : uuid;
+          // 与注册账号一致：带连字符的 v4 UUID，iOS 大写 / Android 小写
+          const deviceId   = _uuid(!isAndroid);
           const s456hr8    = crypto.createHash('md5').update(deviceId + S456HR8_SALT).digest('hex');
           const ua         = pickUA(isAndroid ? androidPool : appPool);
           const clientVer  = (isAndroid ? androidCfg.CLIENT_VERSION : appCfg.CLIENT_VERSION) || null;
