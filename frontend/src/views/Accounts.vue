@@ -549,8 +549,38 @@
       </div>
       <div v-if="opMessages.length > 0" style="margin-top:14px">
         <div style="font-weight:600;margin-bottom:6px;font-size:14px">消息列表（{{ opMessages.length }} 条）</div>
-        <el-table :data="opMessages" size="small" max-height="280" border stripe>
-          <el-table-column prop="title" label="标题" min-width="140" />
+        <el-table
+          :data="opMessages"
+          size="small"
+          max-height="280"
+          border
+          stripe
+          row-key="id"
+          :expand-row-keys="expandedMsgKeys"
+          @row-click="toggleMsgExpand"
+          style="cursor:pointer"
+        >
+          <el-table-column type="expand" width="1">
+            <template #default="{ row }">
+              <div class="reqlog-detail-expand">
+                <div class="reqlog-section">
+                  <div class="reqlog-section-title">正文</div>
+                  <pre class="reqlog-pre">{{ row.content || '（无正文）' }}</pre>
+                </div>
+                <div class="reqlog-section" style="margin-top:10px">
+                  <div class="reqlog-section-title">详情</div>
+                  <div class="record-detail-grid">
+                    <div class="rd-item rd-full"><span class="rd-label">完整标题</span><span class="rd-value">{{ row.title_str || row.title || '—' }}</span></div>
+                    <div class="rd-item"><span class="rd-label">类型</span><span class="rd-value">{{ row.type || '—' }}</span></div>
+                    <div class="rd-item"><span class="rd-label">已读</span><span class="rd-value">{{ row.read_or_not ? '是' : '否' }}</span></div>
+                    <div class="rd-item rd-full"><span class="rd-label">消息ID</span><span class="rd-value rd-mono">{{ row.message_id || '—' }}</span></div>
+                    <div class="rd-item rd-full"><span class="rd-label">生效时间</span><span class="rd-value">{{ row.effect_time || '—' }}</span></div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="title" label="标题" min-width="140" show-overflow-tooltip />
           <el-table-column prop="effect_time" label="时间" width="150" />
           <el-table-column label="已读" width="56">
             <template #default="{ row }">{{ row.read_or_not ? '是' : '否' }}</template>
@@ -2513,6 +2543,7 @@ const opCurrentAccountId  = ref(null)
 const cancellingTradeId   = ref(null)
 const recordTableRef      = ref(null)
 const expandedRecordKeys  = ref([])
+const expandedMsgKeys     = ref([])
 
 const OP_TITLES = {
   'source-records':      '获取挂号记录',
@@ -2540,6 +2571,12 @@ function toggleRecordExpand(row) {
   }
 }
 
+function toggleMsgExpand(row) {
+  const key = row.id
+  const idx = expandedMsgKeys.value.indexOf(key)
+  expandedMsgKeys.value = idx === -1 ? [key] : []
+}
+
 function recordStatusType(record) {
   const s = record.source_status_name
   if (!s || s === '') return 'warning'
@@ -2556,6 +2593,8 @@ async function handleOp(accountId, operationType, opts = {}) {
   opResult.value    = null
   opRecords.value   = []
   opMessages.value  = []
+  expandedRecordKeys.value = []
+  expandedMsgKeys.value    = []
   opLogDialog.value = true
   try {
     const res = await executeAccountOperation(accountId, operationType, opts)
@@ -3445,5 +3484,13 @@ onMounted(loadAll)
 }
 .reg-row-del:hover {
   color: #f56c6c;
+}
+/* 展开列宽度为 1px，默认的 ">" 展开箭头会溢出并与相邻列文字重叠；
+   这些表均通过整行点击展开，故隐藏默认箭头 */
+:deep(.el-table__expand-column .el-table__expand-icon) {
+  display: none;
+}
+:deep(.el-table__expand-column .cell) {
+  padding: 0;
 }
 </style>

@@ -19,7 +19,7 @@
           <div class="tmpl-section">
             <div class="tmpl-section-title">通道</div>
             <div class="tmpl-kv">
-              <span class="k">建通道</span><span class="v mono">{{ row.channel_build_overrides?.startTime || '—' }}</span>
+              <span class="k">建</span><span class="v mono time-sm">{{ fmtTimeSec(row.channel_build_overrides?.startTime) || '—' }}</span>
               <span class="k">窗口</span><span class="v">{{ msToSec(row.channel_build_overrides?.windowTime) || '—' }}</span>
               <span class="k">尝试</span><span class="v">{{ row.channel_build_overrides?.attempts ?? '—' }} 次</span>
               <span class="k">分布</span><span class="v">{{ row.channel_build_overrides?.distribution === 'random' ? '随机' : '均匀' }}</span>
@@ -31,14 +31,14 @@
               <span class="v" :style="row.channel_build_overrides?.autoCloseExcess?.enabled ? 'color:#67c23a' : 'color:#c0c4cc'">
                 {{ row.channel_build_overrides?.autoCloseExcess?.enabled ? '✓' : '✗' }}
               </span>
-              <span class="k">存活上限</span><span class="v">{{ fmtMaxChannels(row.channel_build_overrides?.maxSuccessChannels) }}</span>
+              <span class="k">存活</span><span class="v">{{ fmtMaxChannels(row.channel_build_overrides?.maxSuccessChannels) }}</span>
             </div>
           </div>
 
           <div class="tmpl-section">
             <div class="tmpl-section-title">查号</div>
             <div class="tmpl-kv">
-              <span class="k">查票</span><span class="v mono">{{ row.check_start_time || '—' }}</span>
+              <span class="k">查票</span><span class="v mono time-sm">{{ fmtTimeSec(row.check_start_time) || '—' }}</span>
               <span class="k">窗口</span><span class="v">{{ msToSec(row.check_window_time) || '—' }}</span>
               <span class="k">间隔</span><span class="v">{{ row.check_min_interval ?? '—' }} ms</span>
               <span class="k">停止</span><span class="v">{{ fmtStopCount(row.check_stop_after_found_count) }}</span>
@@ -55,7 +55,7 @@
           <div class="tmpl-section">
             <div class="tmpl-section-title">锁号</div>
             <div class="tmpl-kv">
-              <span class="k">时机</span><span class="v mono">{{ row.lock_config?.lockStartTime || '立即' }}</span>
+              <span class="k">时机</span><span class="v mono time-sm">{{ fmtTimeSec(row.lock_config?.lockStartTime) || '立即' }}</span>
               <span class="k">窗口</span><span class="v">{{ msToSec(row.lock_config?.windowTime) || '—' }}</span>
               <span class="k">预留</span><span class="v">{{ row.lock_config?.reservedChannels ?? 0 }} 条</span>
               <span class="k">Sign</span><span class="v">{{ fmtSignStrategy(row.lock_config?.submitSignStrategy) }}</span>
@@ -412,6 +412,12 @@ function msToSec(ms) {
   return ms >= 60000 ? `${(ms / 60000).toFixed(1)} 分钟` : `${(ms / 1000).toFixed(1)} 秒`
 }
 
+// 时间串只保留到秒（去掉毫秒部分，如 "08:30:00.123" → "08:30:00"）
+function fmtTimeSec(t) {
+  if (!t) return ''
+  return String(t).replace(/(\d{2}:\d{2}:\d{2})\.\d+/, '$1')
+}
+
 function fmtStopCount(n) {
   if (n == null) return '—'
   if (n === 0) return '不停止'
@@ -657,6 +663,8 @@ onMounted(loadAll)
   white-space: nowrap;
 }
 .tmpl-kv .v.mono { font-family: monospace; }
+/* 时间值缩小字号，保证完整时间（精确到秒）不被截断 */
+.tmpl-kv .v.time-sm { font-size: 12px; letter-spacing: 0; }
 
 .tmpl-card-footer {
   padding: 8px 12px;

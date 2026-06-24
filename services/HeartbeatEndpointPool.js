@@ -5,17 +5,19 @@
 // "原始 HTTP 文本要拼成什么样"——connectionChannel.js 的 buildBusinessHeartbeatRequest 按
 // recipe 拼字符串后 socket.write。
 //
-// 候选 endpoint 都是从 account/api/UserBehaviorAPIs.js 里挑出来的"不需要真实 token"的
-// 公开类接口；不需要 hospitalAccountId 等账号侧凭证；服务器只看 status code，body 不会
-// 被解析（connectionChannel.js:1157 的 onData 也确认了这一点）。
+// 全部 21 条 recipe 来自 patient_4.3.7.apk 反编译 + 实测验证（2026-06-24）：
+//   C:\Users\111\Downloads\patient_analysis\API_DOCUMENTATION.md
+// 每个接口在 token 为空时均返回 code:0，确认为真正的公开接口。
+//
+// 通道分两组：
+//   mobile-web   (10 个) — Content-Type: application/json, hospitalId Header: 10097, AES 加密
+//   yizhu4_gam   (11 个) — Content-Type: application/x-www-form-urlencoded, hospitalId Header: 0, 明文
 //
 // ⚠️ 本文件随 services/ 一起部署到云端 agent。云端不上传 account/ 目录（DEPLOY.md 明确
 // 标记 Web 层专用），所以**禁止从这里 require '../account/...'**——否则 agent 启动直接
 // MODULE_NOT_FOUND 崩溃，pm2 看到进程秒挂，健康检查失败。
-// HOSPITAL_ID / DEPT_CODE 是配置常量，直接内联为字符串字面量。
 
 const HOSPITAL_ID = '10097';
-const DEPT_CODE   = '110901';
 
 /**
  * Recipe 字段说明：
@@ -24,15 +26,28 @@ const DEPT_CODE   = '110901';
  *   method          'POST'
  *   path            URL 路径
  *   contentType     Content-Type header 值
- *   hospitalIdHdr   header 里 hospitalId 的值（mobile-web/hlwyy-manage 用 '10097'，yizhu4 系列用 '0'）
- *   bodyTemplate    body 文本，占位符 {HOSPITAL_ID} / {DEPT_CODE} 在抽取时替换
+ *   hospitalIdHdr   header 里 hospitalId 的值（mobile-web 用 '10097'，yizhu4_gam 用 '0'）
+ *   bodyTemplate    body 文本，占位符 ${HOSPITAL_ID} 在抽取时替换
  *   encrypted       true 则 body 走 cryptoUtils.encryptData
  */
 const RECIPES = [
-  // ── /mobile-web/ 加密 JSON ──────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════
+  // mobile-web 通道（10 个）— JSON body, AES 加密
+  // ══════════════════════════════════════════════════════════════
+
   {
-    id: 'mobile_web_sys_config',
-    name: 'systemConfig（系统配置）',
+    id: 'get_encrypt_type',
+    name: '获取加密类型',
+    method: 'POST',
+    path: '/mobile-web/gam.sys.cid.hsr',
+    contentType: 'application/json',
+    hospitalIdHdr: HOSPITAL_ID,
+    bodyTemplate: '{}',
+    encrypted: false,   // 唯一不加密的 mobile-web 接口
+  },
+  {
+    id: 'system_config',
+    name: '系统配置',
     method: 'POST',
     path: '/mobile-web/gam.sys.systemConfig.hsr',
     contentType: 'application/json',
@@ -41,49 +56,113 @@ const RECIPES = [
     encrypted: true,
   },
   {
-    id: 'mobile_web_source_dept_list',
-    name: '科室列表',
+    id: 'hosp_info',
+    name: '医院信息',
     method: 'POST',
-    path: '/mobile-web/source.deptList.hsr',
+    path: '/mobile-web/more.hospital.note.info.hsr',
     contentType: 'application/json',
     hospitalIdHdr: HOSPITAL_ID,
-    bodyTemplate: `{"hospitalId":"${HOSPITAL_ID}","from":0}`,
+    bodyTemplate: `{"type":"HOSPITAL_INFO","hospitalId":"${HOSPITAL_ID}"}`,
     encrypted: true,
   },
   {
-    id: 'mobile_web_source_doctor_list',
-    name: '医生列表',
+    id: 'service_phone',
+    name: '医院服务电话',
     method: 'POST',
-    path: '/mobile-web/source.doctor.list.hsr',
+    path: '/mobile-web/more.hospital.note.info.hsr',
     contentType: 'application/json',
     hospitalIdHdr: HOSPITAL_ID,
-    bodyTemplate: `{"deptCode":"${DEPT_CODE}","hospitalId":"${HOSPITAL_ID}"}`,
+    bodyTemplate: `{"type":"PHONE_NUMBER","hospitalId":"${HOSPITAL_ID}"}`,
     encrypted: true,
   },
   {
-    id: 'mobile_web_source_dept_sch_state',
-    name: '科室排班',
+    id: 'guide_dept_list',
+    name: '导诊科室列表',
     method: 'POST',
-    path: '/mobile-web/source.dept.sch.state.hsr',
+    path: '/mobile-web/guiding.depts.info.hsr',
     contentType: 'application/json',
     hospitalIdHdr: HOSPITAL_ID,
-    bodyTemplate: `{"deptCode":"${DEPT_CODE}","hospitalId":"${HOSPITAL_ID}"}`,
+    bodyTemplate: `{"regType":"RESERVATION","hospitalId":"${HOSPITAL_ID}"}`,
     encrypted: true,
   },
   {
-    id: 'mobile_web_expert_team',
-    name: '专家团队',
+    id: 'guide_dept_doc_list',
+    name: '导诊科室医生列表',
     method: 'POST',
-    path: '/mobile-web/expertTeam.getActiveList.hsr',
+    path: '/mobile-web/guiding.dept.doctors.info.hsr',
     contentType: 'application/json',
     hospitalIdHdr: HOSPITAL_ID,
-    bodyTemplate: `{"hospitalId":"${HOSPITAL_ID}"}`,
+    bodyTemplate: `{"deptId":"124325","regType":"RESERVATION","hospitalId":"${HOSPITAL_ID}"}`,
     encrypted: true,
   },
-  // ── /yizhu4_gam/ form-urlencoded（不加密）────────────────────────
   {
-    id: 'yizhu4_carousel',
-    name: '轮播图',
+    id: 'guide_dept_detail',
+    name: '导诊科室详情',
+    method: 'POST',
+    path: '/mobile-web/guiding.dept.detail.hsr',
+    contentType: 'application/json',
+    hospitalIdHdr: HOSPITAL_ID,
+    bodyTemplate: `{"deptId":"124325","hospitalId":"${HOSPITAL_ID}"}`,
+    encrypted: true,
+  },
+  {
+    id: 'famous_doc_list',
+    name: '名医列表',
+    method: 'POST',
+    path: '/mobile-web/guiding.famous.doctors.info.hsr',
+    contentType: 'application/json',
+    hospitalIdHdr: HOSPITAL_ID,
+    bodyTemplate: `{"unit":"8","hospitalId":"${HOSPITAL_ID}"}`,
+    encrypted: true,
+  },
+  {
+    id: 'dept_list_by_type',
+    name: '按类型获取科室',
+    method: 'POST',
+    path: '/mobile-web/gam/guiding.type.depts.hsr',
+    contentType: 'application/json',
+    hospitalIdHdr: HOSPITAL_ID,
+    bodyTemplate: `{"type":"IMPORTMANT","hospitalId":"${HOSPITAL_ID}"}`,
+    encrypted: true,
+  },
+  {
+    id: 'source_doctor_detail',
+    name: '号源医生详情',
+    method: 'POST',
+    path: '/mobile-web/source.doctor.detail.hsr',
+    contentType: 'application/json',
+    hospitalIdHdr: HOSPITAL_ID,
+    bodyTemplate: `{"doctorCode":"101011","hospitalId":"${HOSPITAL_ID}"}`,
+    encrypted: true,
+  },
+
+  // ══════════════════════════════════════════════════════════════
+  // yizhu4_gam 通道（11 个）— form-urlencoded body, 明文（不加密）
+  // ══════════════════════════════════════════════════════════════
+
+  {
+    id: 'hosp_protocol',
+    name: '医院协议（预约须知）',
+    method: 'POST',
+    path: '/yizhu4_gam/output.protocol.getOne.hsr',
+    contentType: 'application/x-www-form-urlencoded;charset=utf-8',
+    hospitalIdHdr: '0',
+    bodyTemplate: `type=YYXY&hospitalId=${HOSPITAL_ID}`,
+    encrypted: false,
+  },
+  {
+    id: 'notice',
+    name: '联系客服 / 药品快递须知',
+    method: 'POST',
+    path: '/yizhu4_gam/output.protocol.getOne.hsr',
+    contentType: 'application/x-www-form-urlencoded;charset=utf-8',
+    hospitalIdHdr: '0',
+    bodyTemplate: `type=LXKF&hospitalId=${HOSPITAL_ID}`,
+    encrypted: false,
+  },
+  {
+    id: 'banners',
+    name: '轮播 Banner',
     method: 'POST',
     path: '/yizhu4_gam/carousel.getByHospitalId.hsr',
     contentType: 'application/x-www-form-urlencoded;charset=utf-8',
@@ -92,17 +171,37 @@ const RECIPES = [
     encrypted: false,
   },
   {
-    id: 'yizhu4_health_classification',
-    name: '健康分类',
+    id: 'hosp_news',
+    name: '医院新闻',
     method: 'POST',
-    path: '/yizhu4_gam/healthInformation.findClassificationList.hsr',
+    path: '/yizhu4_gam/hospitalFreshNews.getNewsBySelectCondition.hsr',
     contentType: 'application/x-www-form-urlencoded;charset=utf-8',
     hospitalIdHdr: '0',
-    bodyTemplate: `state=1&hospitalId=${HOSPITAL_ID}`,
+    bodyTemplate: `word=&current=1&pageSize=10&state=1&isOnHot=1&hospitalId=${HOSPITAL_ID}`,
     encrypted: false,
   },
   {
-    id: 'yizhu4_health_news',
+    id: 'hosp_notice',
+    name: '医院公告',
+    method: 'POST',
+    path: '/yizhu4_gam/hospitalAnnounced.getNewsBySelectCondition.hsr',
+    contentType: 'application/x-www-form-urlencoded;charset=utf-8',
+    hospitalIdHdr: '0',
+    bodyTemplate: `word=&current=1&pageSize=10&state=1&isOnHot=1&hospitalId=${HOSPITAL_ID}`,
+    encrypted: false,
+  },
+  {
+    id: 'medical_guide',
+    name: '就医指南',
+    method: 'POST',
+    path: '/yizhu4_gam/medicalGuide.getNewsBySelectCondition.hsr',
+    contentType: 'application/x-www-form-urlencoded;charset=utf-8',
+    hospitalIdHdr: '0',
+    bodyTemplate: `word=&current=1&pageSize=10&state=1&isOnHot=1&hospitalId=${HOSPITAL_ID}`,
+    encrypted: false,
+  },
+  {
+    id: 'health_news',
     name: '健康资讯',
     method: 'POST',
     path: '/yizhu4_gam/healthInformation.getNewsBySelectCondition.hsr',
@@ -112,34 +211,43 @@ const RECIPES = [
     encrypted: false,
   },
   {
-    id: 'yizhu4_output_protocol',
-    name: '输出协议',
+    id: 'health_classification',
+    name: '健康资讯分类',
     method: 'POST',
-    path: '/yizhu4_gam/output.protocol.getOne.hsr',
+    path: '/yizhu4_gam/healthInformation.findClassificationList.hsr',
     contentType: 'application/x-www-form-urlencoded;charset=utf-8',
     hospitalIdHdr: '0',
-    bodyTemplate: `type=YYXY&hospitalId=${HOSPITAL_ID}`,
-    encrypted: false,
-  },
-  // ── /hlwyy-manage/ 普通 JSON（不加密）──────────────────────────
-  {
-    id: 'app_manage_menu_list',
-    name: '菜单列表',
-    method: 'POST',
-    path: '/hlwyy-manage/appManage/getAllMenuList',
-    contentType: 'application/json',
-    hospitalIdHdr: HOSPITAL_ID,
-    bodyTemplate: `{"hospitalId":"${HOSPITAL_ID}"}`,
+    bodyTemplate: `state=1&hospitalId=${HOSPITAL_ID}`,
     encrypted: false,
   },
   {
-    id: 'app_manage_menu_class_list',
-    name: '菜单分类',
+    id: 'scrolling_news',
+    name: '滚动消息',
     method: 'POST',
-    path: '/hlwyy-manage/appManage/getAllMenuClassList',
-    contentType: 'application/json',
-    hospitalIdHdr: HOSPITAL_ID,
-    bodyTemplate: `{"hospitalId":"${HOSPITAL_ID}"}`,
+    path: '/yizhu4_gam/scrollingNews.viewScrollingNews.hsr',
+    contentType: 'application/x-www-form-urlencoded;charset=utf-8',
+    hospitalIdHdr: '0',
+    bodyTemplate: `type=2&hospitalId=${HOSPITAL_ID}`,
+    encrypted: false,
+  },
+  {
+    id: 'common_faq_types',
+    name: '常见问题分类',
+    method: 'POST',
+    path: '/yizhu4_gam/output.BasicCommonQuestion.classfiList.hsr',
+    contentType: 'application/x-www-form-urlencoded;charset=utf-8',
+    hospitalIdHdr: '0',
+    bodyTemplate: `hospitalId=${HOSPITAL_ID}`,
+    encrypted: false,
+  },
+  {
+    id: 'common_faqs',
+    name: '常见问题列表',
+    method: 'POST',
+    path: '/yizhu4_gam/output.BasicCommonQuestion.list.hsr',
+    contentType: 'application/x-www-form-urlencoded;charset=utf-8',
+    hospitalIdHdr: '0',
+    bodyTemplate: `hospitalId=${HOSPITAL_ID}&classificationId=1`,
     encrypted: false,
   },
 ];

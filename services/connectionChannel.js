@@ -1,6 +1,7 @@
 // services/connectionChannel.js - 智能响应匹配版本：基于响应内容匹配请求类型
 const tls = require('tls');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { SocksClient } = require('socks');
 
 const ChannelLog = require('../models/channelLog');
@@ -992,8 +993,10 @@ class ConnectionChannel {
     const timeout = this._hbTimeout();
 
     // 构建心跳请求
-    const heartbeatRequest = this.buildHeartbeatRequest();
-    
+    // raw：写入 socket 的完整请求；headersText：原始请求头文本；bodyPlain：加密前明文 body；
+    // encrypted：响应是否需 AES 解密；isHead：HEAD 请求无 body（响应也无 body）
+    const { raw: heartbeatRequest, headersText, bodyPlain, encrypted, isHead } = this.buildHeartbeatRequest();
+
     // 心跳日志数据
     // heartbeat_type 直接写"实际发出去的是什么"：
     //   - 'head' 类型 → 'head'
@@ -1015,23 +1018,34 @@ class ConnectionChannel {
       success: false,
       statusCode: null,
       errorMessage: null,
+      requestData: bodyPlain,          // 请求内容（加密前明文，HEAD 为 null）
+      requestHeaders: headersText,     // 请求头（实际发出的原始文本）
+      responseData: null,              // 返回内容（解密后，成功时填充）
       responseHeaders: null,
       heartbeatType: loggedType,
     };
-    
+
     try {
       // 使用 sendHeartbeatRequest 发送心跳（走独立的响应处理）
-      const result = await this.sendHeartbeatRequest(heartbeatRequest, timeout);
-      
+      // 非 HEAD 心跳需读完整响应体以便解密入库
+      const result = await this.sendHeartbeatRequest(heartbeatRequest, timeout, { readBody: !isHead });
+
       const receiveTime = Date.now();
       const duration = receiveTime - sendTime;
-      
+
       // 更新日志
       heartbeatLog.endTime = receiveTime;
       heartbeatLog.duration = duration;
       heartbeatLog.success = true;
       heartbeatLog.statusCode = result.statusCode;
       heartbeatLog.responseHeaders = result.headers ? JSON.stringify(result.headers) : null;
+
+      // 解析返回内容：去分块 → 解压 → （加密端点）AES 解密，与查票锁号解密链路一致
+      if (!isHead && result.rawResponse) {
+        heartbeatLog.responseData = this._decodeHeartbeatResponseBody(
+          result.rawResponse, result.headers || {}, encrypted
+        );
+      }
 
       // 记录最后一次心跳成功时间（用于代理优先级评分）
       this.lastHeartbeatSuccessAt = receiveTime;
@@ -1085,17 +1099,23 @@ class ConnectionChannel {
       return this.buildBusinessHeartbeatRequest();
     }
 
-    // 默认: HEAD 请求（没有 recipe 概念）
+    // 默认: HEAD 请求（没有 recipe 概念，无 body）
     this._lastHeartbeatRecipeId = null;
-    const headers = [
+    const headerLines = [
       `HEAD / HTTP/1.1`,
       `Host: ${this.targetHost}`,
       'Connection: keep-alive',
       'User-Agent: Mozilla/5.0',
-      '',
-      ''
     ];
-    return headers.join('\r\n');
+    // raw：实际写入 socket 的完整请求；headersText：入库的原始请求头文本；
+    // bodyPlain：加密前的明文 body（HEAD 无 body → null）；encrypted：响应是否需解密
+    return {
+      raw: [...headerLines, '', ''].join('\r\n'),
+      headersText: headerLines.join('\r\n'),
+      bodyPlain: null,
+      encrypted: false,
+      isHead: true,
+    };
   }
 
   /**
@@ -1133,12 +1153,14 @@ class ConnectionChannel {
     const ua       = acc.user_agent || _DEFAULT_HEARTBEAT_UA(platform);
     const referer  = platform === 'wechat' ? (acc.referer || '') : null;
 
-    const body          = recipe.encrypted ? this.cryptoUtils.encryptData(recipe.bodyTemplate) : recipe.bodyTemplate;
+    // bodyPlain：加密前的明文 body（入库用）；body：实际发出的 body（加密后或原文）
+    const bodyPlain     = recipe.bodyTemplate;
+    const body          = recipe.encrypted ? this.cryptoUtils.encryptData(bodyPlain) : bodyPlain;
     const contentLength = Buffer.byteLength(body, 'utf8');
 
-    let headers;
+    let headerLines;
     if (platform === 'android') {
-      headers = [
+      headerLines = [
         `${recipe.method} ${recipe.path} HTTP/1.1`,
         `s456hr8: ${s456hr8}`,
         `SubmitSign: `,
@@ -1150,11 +1172,9 @@ class ConnectionChannel {
         `Host: ${host}`,
         `Connection: Keep-Alive`,
         `Accept-Encoding: gzip`,
-        ``,
-        body,
       ];
     } else if (platform === 'wechat') {
-      headers = [
+      headerLines = [
         `${recipe.method} ${recipe.path} HTTP/1.1`,
         `Host: ${host}`,
         `Connection: keep-alive`,
@@ -1168,12 +1188,10 @@ class ConnectionChannel {
         `Accept-Encoding: gzip,compress,br,deflate`,
         `User-Agent: ${ua}`,
         `Referer: ${referer}`,
-        ``,
-        body,
       ];
     } else {
       // 默认 iOS App
-      headers = [
+      headerLines = [
         `${recipe.method} ${recipe.path} HTTP/1.1`,
         `Host: ${host}`,
         `Accept: */*`,
@@ -1187,11 +1205,15 @@ class ConnectionChannel {
         `User-Agent: ${ua}`,
         `Connection: keep-alive`,
         `SubmitSign: `,
-        ``,
-        body,
       ];
     }
-    return headers.join('\r\n');
+    return {
+      raw: [...headerLines, '', body].join('\r\n'),
+      headersText: headerLines.join('\r\n'),
+      bodyPlain,
+      encrypted: !!recipe.encrypted,
+      isHead: false,
+    };
   }
 
   /**
@@ -1199,7 +1221,8 @@ class ConnectionChannel {
    * 心跳使用独立的响应处理，不进入业务请求队列
    * 因为心跳只在通道空闲时发送，不会与业务请求冲突
    */
-  sendHeartbeatRequest(requestData, timeout) {
+  sendHeartbeatRequest(requestData, timeout, opts = {}) {
+    const readBody = opts.readBody === true;
     return new Promise((resolve, reject) => {
       if (!this.socket || !this.isConnected) {
         reject(new Error('通道未连接'));
@@ -1220,6 +1243,13 @@ class ConnectionChannel {
       let responseBuffer = Buffer.from('');
       let resolved = false;
 
+      // 响应头解析状态（仅解析一次）
+      let headersParsed = false;
+      let statusCode = 0;
+      let headers = {};
+      let contentLength = null;
+      let isChunked = false;
+
       const cleanup = () => {
         if (timeoutTimer) {
           clearTimeout(timeoutTimer);
@@ -1233,6 +1263,13 @@ class ConnectionChannel {
         this._heartbeatOnData = null;
       };
 
+      const finish = () => {
+        resolved = true;
+        tlsSocket.removeListener('data', onData);
+        cleanup();
+        resolve({ statusCode, headers, rawResponse: responseBuffer, data: responseBuffer.toString() });
+      };
+
       const onData = (data) => {
         if (resolved) return;
 
@@ -1240,17 +1277,17 @@ class ConnectionChannel {
 
         // 检查响应头是否完整
         const headerEndIndex = responseBuffer.indexOf('\r\n\r\n');
-        if (headerEndIndex !== -1) {
-          resolved = true;
+        if (headerEndIndex === -1) return; // 头部还没接收完
 
-          // 解析状态码
+        // 首次解析响应头与状态码、Content-Length、分块标志
+        if (!headersParsed) {
+          headersParsed = true;
           const headersText = responseBuffer.subarray(0, headerEndIndex).toString();
           const statusMatch = headersText.match(/HTTP\/\d\.\d\s+(\d+)/);
-          const statusCode = statusMatch ? parseInt(statusMatch[1]) : 0;
+          statusCode = statusMatch ? parseInt(statusMatch[1]) : 0;
 
           // 解析响应头为对象（key 统一小写）
           const headerLines = headersText.split('\r\n');
-          const headers = {};
           for (let i = 1; i < headerLines.length; i++) {
             const colonIdx = headerLines[i].indexOf(':');
             if (colonIdx > 0) {
@@ -1259,12 +1296,24 @@ class ConnectionChannel {
               headers[key] = val;
             }
           }
+          if (headers['content-length'] != null) {
+            contentLength = parseInt(headers['content-length'], 10);
+          }
+          isChunked = (headers['transfer-encoding'] || '').toLowerCase().includes('chunked');
+        }
 
-          // 移除临时监听器（用捕获的 tlsSocket，而非 this.socket）
-          tlsSocket.removeListener('data', onData);
+        // HEAD 或不需读 body：响应头到齐即完成（沿用原行为，无 body）
+        if (!readBody) { finish(); return; }
 
-          cleanup();
-          resolve({ statusCode, headers, data: responseBuffer.toString() });
+        // 等待响应体完整后再完成
+        const bodyData = responseBuffer.subarray(headerEndIndex + 4);
+        if (contentLength !== null) {
+          if (bodyData.length >= contentLength) finish();
+        } else if (isChunked) {
+          if (bodyData.includes(Buffer.from('0\r\n\r\n'))) finish();
+        } else {
+          // 无 Content-Length 且非分块：keep-alive 下无法判定 body 长度，头到齐即完成
+          finish();
         }
       };
 
@@ -1296,6 +1345,61 @@ class ConnectionChannel {
         reject(error);
       }
     });
+  }
+
+  /**
+   * 解析心跳返回内容为可读明文，链路与查票锁号一致：
+   *   去分块(chunked) → 解压(gzip/deflate/br) → 加密端点再 AES 解密
+   * 入参 rawResponse 为完整响应（含响应头）的 Buffer。失败时返回 null（不影响心跳成功判定）。
+   */
+  _decodeHeartbeatResponseBody(rawResponse, headers, encrypted) {
+    try {
+      const headerEndIndex = rawResponse.indexOf('\r\n\r\n');
+      if (headerEndIndex === -1) return null;
+
+      let bodyBuf = rawResponse.subarray(headerEndIndex + 4);
+
+      // 去分块
+      if ((headers['transfer-encoding'] || '').toLowerCase().includes('chunked')) {
+        bodyBuf = this._dechunkBuffer(bodyBuf);
+      }
+
+      // 解压（非加密端点常带 gzip；加密端点实测不压缩，此处为兜底）
+      const enc = (headers['content-encoding'] || '').toLowerCase();
+      if (enc.includes('gzip'))         bodyBuf = zlib.gunzipSync(bodyBuf);
+      else if (enc.includes('deflate')) bodyBuf = zlib.inflateSync(bodyBuf);
+      else if (enc.includes('br'))      bodyBuf = zlib.brotliDecompressSync(bodyBuf);
+
+      if (bodyBuf.length === 0) return null;
+
+      // 加密端点：AES 解密（decryptData 接受 Buffer，内部按需转 base64）
+      if (encrypted) {
+        return this.cryptoUtils.decryptData(bodyBuf);
+      }
+      return bodyBuf.toString('utf8');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 解析 HTTP chunked 传输编码的 body（Buffer 版），返回拼接后的原始字节。
+   */
+  _dechunkBuffer(buf) {
+    const parts = [];
+    let pos = 0;
+    while (pos < buf.length) {
+      const lineEnd = buf.indexOf('\r\n', pos);
+      if (lineEnd === -1) break;
+      const size = parseInt(buf.subarray(pos, lineEnd).toString('ascii').trim(), 16);
+      if (isNaN(size) || size === 0) break; // 末块或异常
+      const start = lineEnd + 2;
+      const end = start + size;
+      if (end > buf.length) break;
+      parts.push(buf.subarray(start, end));
+      pos = end + 2; // 跳过块尾 \r\n
+    }
+    return Buffer.concat(parts);
   }
 }
 

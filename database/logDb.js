@@ -154,14 +154,17 @@ class LogDatabase {
             proxy_port       INTEGER,
             target_host      TEXT,
             target_port      INTEGER,
+            heartbeat_type   TEXT,
             start_time       TEXT,
             end_time         TEXT,
             duration         INTEGER,
             success          INTEGER DEFAULT 0,
             status_code      INTEGER,
-            error_message    TEXT,
+            request_data     TEXT,
+            request_headers  TEXT,
+            response_data    TEXT,
             response_headers TEXT,
-            heartbeat_type   TEXT,
+            error_message    TEXT,
             created_at       TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime'))
           )
         `, (err) => { if (err) console.error('❌ 创建 heartbeat_logs 表失败:', err); });
@@ -369,17 +372,20 @@ class LogDatabase {
       const sql = `
         INSERT INTO heartbeat_logs
           (run_id, task_id, channel_id, proxy_ip, proxy_port, target_host, target_port,
-           start_time, end_time, duration, success, status_code, error_message,
-           response_headers, heartbeat_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           heartbeat_type, start_time, end_time, duration, success, status_code,
+           request_data, request_headers, response_data, response_headers, error_message)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
       this.db.run(sql, [
         this.runId, this.taskId,
         log.channelId, log.proxyIp, log.proxyPort, log.targetHost, log.targetPort,
+        log.heartbeatType || null,
         this.getBeijingTimeWithMillis(log.startTime),
         log.endTime ? this.getBeijingTimeWithMillis(log.endTime) : null,
         log.duration || 0, log.success ? 1 : 0, log.statusCode,
-        log.errorMessage, log.responseHeaders || null, log.heartbeatType || null,
+        log.requestData || null, log.requestHeaders || null,
+        log.responseData || null, log.responseHeaders || null,
+        log.errorMessage,
       ], function (err) {
         if (err) { console.error('❌ 保存心跳日志失败:', err); reject(err); }
         else resolve(this.lastID);
