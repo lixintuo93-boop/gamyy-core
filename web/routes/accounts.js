@@ -14,6 +14,7 @@ router.get('/', (req, res) => {
       COALESCE(ad.uuid, ad.device_id) AS device_uuid,
       (SELECT COUNT(*) FROM tasks t WHERE t.account_id = a.id) AS task_count,
       (SELECT COUNT(*) FROM proxies p WHERE p.account_id = a.id AND p.enabled = 1) AS proxy_count,
+      (SELECT r.request_time FROM account_request_logs r WHERE r.account_id = a.id ORDER BY r.id DESC LIMIT 1) AS last_request_time,
       CASE WHEN op.id IS NULL THEN NULL WHEN op.proxy_type = 'direct' THEN '本机直连' ELSE op.host || ':' || op.port END AS ops_proxy_label
       FROM accounts a
       LEFT JOIN proxies op ON op.id = a.ops_proxy_id

@@ -4278,6 +4278,15 @@
                 return `<div class="no-data">该代理没有任何通道记录</div>`;
             }
 
+            // 15:00:00 竖线（贯穿所有通道行，便于观察该时刻仍存活的通道）
+            let relLineHtml = '';
+            const _relTs = new Date(timeRange.min); _relTs.setHours(15, 0, 0, 0);
+            const _relTsMs = _relTs.getTime();
+            if (_relTsMs > timeRange.min && _relTsMs < timeRange.max) {
+                const _relPos = getPos(_relTsMs);
+                relLineHtml = `<div style="position:absolute;left:${_relPos}%;top:0;bottom:0;width:0;border-left:1px dashed #f59e0b;opacity:0.6;pointer-events:none;z-index:5;"></div>`;
+            }
+
             return allChannels.map(ch => {
                 const heartbeats = heartbeatMap[ch.id] || [];
                 const checks = checkMap[ch.id] || [];
@@ -4354,7 +4363,7 @@
                 const labelPrefix = ch.isProbeTest ? '探' : (ch.status === 'failed' ? '✗' : '');
                 return `<div class="channel-row ${rowClass}">
                     <div class="channel-label" title="${ch.id}${ch.isProbeTest ? '\n探活RST' : ''}" ${labelClass}>${labelPrefix}#${channelNum}</div>
-                    <div class="channel-timeline">${bars}${dots}</div>
+                    <div class="channel-timeline">${bars}${dots}${relLineHtml}</div>
                 </div>`;
             }).join('');
         }
@@ -4415,14 +4424,25 @@
                 linePts += ` ${toX(series[i].ts)},${toY(series[i-1].count)} ${toX(series[i].ts)},${toY(series[i].count)}`;
             }
 
-            // 15:00:00 竖线
+            // 15:00:00 竖线 + 该时刻存活数量标注
+            // 注意：SVG 用 preserveAspectRatio="none" 横向被拉伸，<text> 会变形，
+            // 因此数量标注用 HTML 覆盖层（不受 SVG 缩放影响），仅竖线留在 SVG 内。
             let releaseLine = '';
+            let relLabelHtml = '';
             const relTs = new Date(min);
             relTs.setHours(15, 0, 0, 0);
             const relTsMs = relTs.getTime();
             if (relTsMs > min && relTsMs < max) {
                 const rx = toX(relTsMs);
                 releaseLine = `<line x1="${rx}" y1="0" x2="${rx}" y2="${H}" stroke="#f59e0b" stroke-width="2" stroke-opacity="0.8" vector-effect="non-scaling-stroke"/>`;
+                // 阶梯序列上查找 15:00:00 时刻的存活数量（最后一个 ts <= relTsMs 的点）
+                let aliveAtRel = 0;
+                for (const s of series) {
+                    if (s.ts <= relTsMs) aliveAtRel = s.count;
+                    else break;
+                }
+                const relLeftPct = ((relTsMs - min) / span * 100).toFixed(2);
+                relLabelHtml = `<div style="position:absolute;left:${relLeftPct}%;top:2px;transform:translateX(-100%);padding-right:5px;font-size:10px;font-weight:600;font-family:monospace;color:#f59e0b;white-space:nowrap;pointer-events:none;">15:00 存活 ${aliveAtRel}</div>`;
             }
 
             // 水平网格线
@@ -4475,7 +4495,7 @@
                     <span class="alive-chart-title">存活</span>
                     <span>0</span>
                 </div>
-                <div class="alive-chart-timeline">${svg}</div>
+                <div class="alive-chart-timeline">${svg}${relLabelHtml}</div>
             </div>`;
         }
 

@@ -145,7 +145,7 @@
               :model-value="acct.proxy_max_count || defaultProxyMaxCount"
               @click.stop
               @change="(v) => updateProxyMax(acct, v)"
-              :min="1" :max="200" :controls="false"
+              :min="1" :controls="false"
               size="small" style="width:58px;flex-shrink:0"
               :disabled="accountHasRunningTask(acct.id)"
               title="任务代理上限"
@@ -580,7 +580,12 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column prop="title" label="标题" min-width="140" show-overflow-tooltip />
+          <el-table-column label="标题" min-width="140" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span :style="isRiskMessage(row) ? 'color:#f56c6c;font-weight:600' : ''">{{ row.title_str || row.title || '—' }}</span>
+              <el-tag v-if="isRiskMessage(row)" type="danger" size="small" style="margin-left:6px">异常登录</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column prop="effect_time" label="时间" width="150" />
           <el-table-column label="已读" width="56">
             <template #default="{ row }">{{ row.read_or_not ? '是' : '否' }}</template>
@@ -828,6 +833,7 @@
             <el-tag v-if="row.status === 'pending'" type="info" size="small">等待</el-tag>
             <el-tag v-else-if="row.status === 'running'" type="warning" size="small">执行中</el-tag>
             <el-tag v-else-if="row.status === 'done'" type="success" size="small">完成</el-tag>
+            <el-tag v-else-if="row.status === 'skipped'" type="info" size="small">已跳过</el-tag>
             <el-tag v-else type="danger" size="small">失败</el-tag>
           </template>
         </el-table-column>
@@ -835,6 +841,72 @@
       </el-table>
       <template #footer>
         <el-button :disabled="batchRunning" @click="batchProgressDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 批量启动·风控预检 -->
+    <el-dialog v-model="startPreflightDialog" title="批量启动前确认" width="820px" :append-to-body="true">
+      <div style="margin-bottom:8px;color:#909399;font-size:12px;line-height:1.6">{{ START_RISK_EXPLAIN }}</div>
+      <el-table
+        :data="startPreflightRows"
+        v-loading="startPreflightLoading"
+        size="small" max-height="380" border stripe
+        :row-class-name="({ row }) => row.risky ? 'preflight-risky-row' : ''"
+      >
+        <el-table-column prop="mobile" label="手机号" width="120" />
+        <el-table-column prop="taskLabel" label="任务" min-width="130" show-overflow-tooltip />
+        <el-table-column label="最后请求(距今)" min-width="250" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.hasLog" style="white-space:nowrap">{{ row.lastStr }}（{{ row.agoStr }}前）</span>
+            <span v-else style="color:#e6a23c">无历史请求记录</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="checkStr" label="查票开始" width="120" />
+        <el-table-column label="间隔" width="96">
+          <template #default="{ row }">
+            <span :style="{ color: row.risky ? '#f56c6c' : '#67c23a', fontWeight: 600 }">{{ row.gapStr }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="cancelBatchStart">取消</el-button>
+        <el-button type="primary" :loading="startPreflightLoading" @click="confirmBatchStart">全部启动</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 批量添加患者·风控预检 -->
+    <el-dialog v-model="patientPreflightDialog" title="批量添加患者前确认" width="560px" :append-to-body="true">
+      <div style="margin-bottom:8px;color:#909399;font-size:12px;line-height:1.6">
+        添加前自动获取消息以检测风控（异常登录）。默认跳过风控/获取消息失败的账号，仅为正常账号添加。
+      </div>
+      <div v-if="!patientPreflightLoading" style="margin-bottom:6px;font-size:13px">
+        <span style="color:#f56c6c">风控 {{ patientPreflightCounts.risk }}</span> ·
+        <span style="color:#e6a23c">获取失败 {{ patientPreflightCounts.fail }}</span> ·
+        <span style="color:#67c23a">正常 {{ patientPreflightCounts.ok }}</span>
+      </div>
+      <el-table
+        :data="patientPreflightRows"
+        v-loading="patientPreflightLoading"
+        element-loading-text="检测风控中…"
+        size="small" max-height="360" border stripe
+        :row-class-name="({ row }) => row.cls !== 'ok' ? 'preflight-risky-row' : ''"
+      >
+        <el-table-column prop="mobile" label="手机号" width="140" />
+        <el-table-column label="检测结果" min-width="140">
+          <template #default="{ row }">
+            <span v-if="row.cls === 'risk'" style="color:#f56c6c;font-weight:600">风控</span>
+            <span v-else-if="row.cls === 'fail'" style="color:#e6a23c">获取消息失败</span>
+            <span v-else style="color:#67c23a">正常</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="cancelPatientPreflight">取消</el-button>
+        <template v-if="patientPreflightHasIssue">
+          <el-button :loading="patientPreflightLoading" @click="confirmPatientPreflight('all')">全部继续({{ patientPreflightRows.length }})</el-button>
+          <el-button type="primary" :loading="patientPreflightLoading" @click="confirmPatientPreflight('skip')">跳过风控并继续({{ patientPreflightCounts.ok }})</el-button>
+        </template>
+        <el-button v-else type="primary" :loading="patientPreflightLoading" @click="confirmPatientPreflight('all')">开始添加({{ patientPreflightRows.length }})</el-button>
       </template>
     </el-dialog>
 
@@ -1729,6 +1801,83 @@ function defaultLockDate() {
   return d.toISOString().split('T')[0]
 }
 
+// ── 启动前风控提示：最后请求时间 → 查票窗口开始时间 ──
+const START_RISK_THRESHOLD_MS = 30 * 60 * 1000   // 间隔超过 30 分钟视为风险（仅标红提醒）
+
+// request_time 存的是本地时间且月/日/时可能不补零（如 "2026-6-25 21:34:29"），
+// new Date(isoStr) 解析这种格式会得到 Invalid Date，需手动按本地时间拆解。
+function parseDbTime(str) {
+  const m = String(str || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2}):(\d{2})/)
+  if (!m) return null
+  return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])
+}
+
+// 'HH:MM:SS[.mmm]' 时分秒字符串 → 一天内的毫秒数（用于比较先后）
+function timeStrToMs(t) {
+  const m = String(t || '').match(/^(\d{1,2}):(\d{2}):(\d{2})/)
+  return m ? (+m[1] * 3600 + +m[2] * 60 + +m[3]) * 1000 : Infinity
+}
+
+// 'HH:MM:SS' → 今天该时刻的 Date
+function timeStrToTodayDate(t) {
+  const m = String(t || '').match(/^(\d{1,2}):(\d{2}):(\d{2})/)
+  if (!m) return null
+  const d = new Date()
+  d.setHours(+m[1], +m[2], +m[3], 0)
+  return d
+}
+
+function fmtAgo(ms) {
+  if (ms == null) return '—'
+  if (ms < 0) ms = 0
+  const s = Math.floor(ms / 1000)
+  const h = Math.floor(s / 3600)
+  const mn = Math.floor((s % 3600) / 60)
+  if (h > 0) return `${h}小时${mn}分钟`
+  if (mn > 0) return `${mn}分钟`
+  return `${s}秒`
+}
+
+// 任务下所有代理中最早的查票开始时间（时分秒字符串）；必要时按需拉取代理列表
+async function earliestCheckStart(taskId) {
+  let proxies = taskProxiesMap[taskId]
+  if (!proxies) {
+    try {
+      const r = await getTaskProxies(taskId)
+      proxies = r.data
+      taskProxiesMap[taskId] = r.data
+    } catch (_) { proxies = [] }
+  }
+  const times = (proxies || [])
+    .map(p => (p.effective?.check_start_time || p.check_start_time || '').trim())
+    .filter(Boolean)
+  if (!times.length) return null
+  times.sort((a, b) => timeStrToMs(a) - timeStrToMs(b))
+  return times[0]
+}
+
+// 汇总单个任务的启动风控信息
+// 间隔 = 今日查票开始时间 − 最后请求时间（即账号从最后一次干净请求到开始查票的静默时长）
+async function buildStartRisk(acct, task) {
+  const lastStr  = acct?.last_request_time || null
+  const lastDate = parseDbTime(lastStr)
+  const checkStr = await earliestCheckStart(task.id)   // 任务下所有代理中最早的查票开始时间
+  const checkAbs = checkStr ? timeStrToTodayDate(checkStr) : null
+  const gapMs    = (lastDate && checkAbs) ? (checkAbs.getTime() - lastDate.getTime()) : null
+  return {
+    lastStr, lastDate, hasLog: !!lastDate,
+    checkStr, checkAbs,
+    gapMs,                                              // 可能为负：最后请求晚于今日查票时间
+    risky: gapMs != null && gapMs > START_RISK_THRESHOLD_MS,
+  }
+}
+
+const START_RISK_EXPLAIN =
+  '账号的操作代理通常是纯净的家庭 IP，而任务代理通常是 IDC 代理（会被服务器识别）。' +
+  '服务器会周期性检查账号"首个请求"所用的代理：若账号长时间未通过操作代理活动，' +
+  '之后任务又用 IDC 代理发出第一个请求，就可能被异常登录检测判定为风控。' +
+  '距上次操作代理请求的间隔越长风险越高，必要时可先"获取消息"用操作代理刷新一次活跃度再启动。'
+
 // ── 数据加载 ──
 async function loadAll() {
   loading.value = true
@@ -1849,14 +1998,55 @@ async function doAutoGenerate() {
   }
 }
 
+// ── 风控检测（与后端 _scanRiskMessages 逻辑一致）──
+// 单条消息是否为异常登录（疑似风控）
+function isRiskMessage(m) {
+  return !!(m && (m.title_str === '异常登录提醒' || (m.content && m.content.includes('异常登录'))))
+}
+
+function messagesIndicateRisk(messages) {
+  if (!Array.isArray(messages)) return false
+  return messages.some(isRiskMessage)
+}
+
+// 获取消息并检测风控：返回 { ok, risk }。ok=false 表示获取消息失败（账号可能未登录）
+async function fetchMessagesAndDetectRisk(accountId) {
+  try {
+    const res = await executeAccountOperation(accountId, 'messages')
+    if (res.data?.error) return { ok: false, risk: false }
+    const messages = res.data?.result?.messages || []
+    return { ok: true, risk: messagesIndicateRisk(messages) }
+  } catch (_) {
+    return { ok: false, risk: false }
+  }
+}
+
 async function doAddPatient() {
   if (!patientForm.name || !patientForm.idNo) {
     ElMessage.warning('请填写姓名和身份证号')
     return
   }
-  addPatientDialog.value = false
   const acct = patientTargetAccount.value
   if (!acct) return
+  addPatientDialog.value = false
+
+  // 添加前自动获取消息以检测风控
+  const { ok, risk } = await fetchMessagesAndDetectRisk(acct.id)
+  try { await reloadAccounts() } catch (_) {}
+  if (!ok) {
+    try {
+      await ElMessageBox.confirm('获取消息失败，无法检测该账号是否被风控，是否仍要继续添加患者？', '风控检测失败', {
+        type: 'warning', confirmButtonText: '仍要继续', cancelButtonText: '取消'
+      })
+    } catch (_) { return }
+  } else if (risk) {
+    try {
+      await ElMessageBox.confirm('该账号检测到异常登录消息（疑似风控），是否仍要继续添加患者？', '风控提醒', {
+        type: 'warning', confirmButtonText: '仍要继续', cancelButtonText: '取消'
+      })
+    } catch (_) { return }
+  }
+
   await handleOp(acct.id, 'add-patient', { ...patientForm })
 }
 
@@ -1890,7 +2080,46 @@ function openConfig(task) {
   configDialogVisible.value = true
 }
 
+function findAccountForTask(task) {
+  if (task.account_id != null) {
+    const a = accounts.value.find(x => x.id === task.account_id)
+    if (a) return a
+  }
+  for (const a of accounts.value) {
+    if ((accountTasksMap.value[a.id] || []).some(t => t.id === task.id)) return a
+  }
+  return null
+}
+
+function startRiskRowHtml(info) {
+  const now = Date.now()
+  const lastLine = info.hasLog
+    ? `${info.lastStr}（${fmtAgo(now - info.lastDate.getTime())}前）`
+    : '<span style="color:#e6a23c">无历史请求记录</span>'
+  const checkLine = info.checkStr ? `今天 ${info.checkStr}（任务下最早）` : '自动计算'
+  let gapLine
+  if (!info.hasLog || !info.checkStr) gapLine = '—'
+  else if (info.gapMs > 0) gapLine = `<b style="color:${info.risky ? '#f56c6c' : '#67c23a'}">${fmtAgo(info.gapMs)}</b>`
+  else gapLine = '<span style="color:#909399">最后请求晚于今日查票时间</span>'
+  return `<div>最后请求时间：${lastLine}</div>` +
+         `<div>查票窗口开始时间：${checkLine}</div>` +
+         `<div>间隔（最后请求 → 查票开始）：${gapLine}</div>`
+}
+
 async function handleStart(task) {
+  const acct = findAccountForTask(task)
+  const info = await buildStartRisk(acct, task)
+  const html =
+    `<div style="line-height:1.7">${startRiskRowHtml(info)}` +
+    `<div style="margin-top:8px;color:#909399;font-size:12px">${START_RISK_EXPLAIN}</div></div>`
+  try {
+    await ElMessageBox.confirm(html, '启动前确认', {
+      dangerouslyUseHTMLString: true,
+      type: info.risky ? 'warning' : 'info',
+      confirmButtonText: '启动',
+      cancelButtonText: '取消',
+    })
+  } catch (_) { return }
   try {
     await startTask(task.id)
     runtimeStatus[task.id] = { status: 'initializing' }
@@ -2155,22 +2384,60 @@ async function runBatchOp(opType) {
   if (['login', 'add-patient'].includes(opType)) await loadAll()
 }
 
+// ── 批量启动前风控预检 ──
+const startPreflightDialog  = ref(false)
+const startPreflightLoading = ref(false)
+const startPreflightRows    = ref([])
+const startPreflightTargets = ref([])
+
 async function runBatchStartTasks() {
   const ids = [...selectedBatchIds.value]
   const targets = accounts.value.filter(a => ids.includes(a.id) && a.enabled === 1)
   if (targets.length === 0) { ElMessage.warning('没有可操作的启用账号'); return }
 
-  batchProgressOp.value = '批量启动任务'
   const taskTargets = []
   for (const acct of targets) {
     const tasks = accountTasksMap.value[acct.id] || []
     for (const t of tasks) {
-      if (t.enabled && !isRunning(t.id)) taskTargets.push({ accountId: acct.id, mobile: acct.mobile, taskId: t.id })
+      if (t.enabled && !isRunning(t.id)) taskTargets.push({ accountId: acct.id, mobile: acct.mobile, taskId: t.id, task: t, acct })
     }
   }
-
   if (taskTargets.length === 0) { ElMessage.warning('所选账号无可启动的已启用任务'); return }
 
+  // 预检：逐任务汇总「最后请求时间 → 查票开始时间」风控信息
+  startPreflightTargets.value = taskTargets
+  startPreflightRows.value    = []
+  startPreflightLoading.value = true
+  startPreflightDialog.value  = true
+  const now = Date.now()
+  startPreflightRows.value = await Promise.all(taskTargets.map(async (tt) => {
+    const info = await buildStartRisk(tt.acct, tt.task)
+    return {
+      mobile:    tt.mobile,
+      taskLabel: `${tt.task.doctor_code || tt.task.dept_code || '—'} / ${tt.task.lock_plan_date || '—'}`,
+      lastStr:   info.hasLog ? info.lastStr : '',
+      agoStr:    info.hasLog ? fmtAgo(now - info.lastDate.getTime()) : '',
+      checkStr:  info.checkStr ? `今天 ${info.checkStr}` : '自动计算',
+      gapStr:    (info.hasLog && info.checkStr) ? (info.gapMs > 0 ? fmtAgo(info.gapMs) : '已晚于查票') : '—',
+      risky:     info.risky,
+      hasLog:    info.hasLog,
+    }
+  }))
+  startPreflightLoading.value = false
+}
+
+function cancelBatchStart() {
+  startPreflightDialog.value  = false
+  startPreflightTargets.value = []
+  startPreflightRows.value    = []
+}
+
+async function confirmBatchStart() {
+  const taskTargets = startPreflightTargets.value
+  startPreflightDialog.value = false
+  if (!taskTargets.length) return
+
+  batchProgressOp.value = '批量启动任务'
   batchProgressItems.value = taskTargets.map(t => ({ accountId: t.accountId, mobile: t.mobile, taskId: t.taskId, status: 'pending', msg: '' }))
   batchProgressDialog.value = true
   batchRunning.value = true
@@ -2252,6 +2519,21 @@ const batchPatientDialog  = ref(false)
 const batchPatientMinAge  = ref(18)
 const batchPatientMaxAge  = ref(60)
 const batchPatientGender  = ref('')
+
+// 批量添加患者·风控预检
+const patientPreflightDialog  = ref(false)
+const patientPreflightLoading = ref(false)
+const patientPreflightRows    = ref([])   // {accountId, mobile, cls:'ok'|'risk'|'fail'}
+const patientPreflightTargets = ref([])
+
+const patientPreflightCounts = computed(() => {
+  const c = { ok: 0, risk: 0, fail: 0 }
+  for (const r of patientPreflightRows.value) c[r.cls] = (c[r.cls] || 0) + 1
+  return c
+})
+const patientPreflightHasIssue = computed(() =>
+  patientPreflightCounts.value.risk + patientPreflightCounts.value.fail > 0
+)
 
 const selectedEnabledCount = computed(() =>
   accounts.value.filter(a => selectedBatchIds.value.has(a.id) && a.enabled === 1).length
@@ -2346,20 +2628,63 @@ function openBatchAddPatient() {
   batchPatientDialog.value = true
 }
 
+// 阶段一：关配置窗 → 开专用预检窗 → 并发获取消息检测风控（不触碰进度窗）
 async function doRunBatchAddPatient() {
   const targets = accounts.value.filter(a => selectedBatchIds.value.has(a.id) && a.enabled === 1)
   if (targets.length === 0) return
 
-  batchPatientDialog.value = false
-  batchProgressOp.value    = '批量添加患者'
-  batchProgressItems.value = targets.map(a => ({ accountId: a.id, mobile: a.mobile, status: 'pending', msg: '' }))
+  batchPatientDialog.value     = false
+  patientPreflightTargets.value = targets
+  patientPreflightRows.value    = targets.map(a => ({ accountId: a.id, mobile: a.mobile, cls: 'ok' }))
+  patientPreflightLoading.value = true
+  patientPreflightDialog.value  = true
+
+  const CONCURRENCY = 25
+  const rows = patientPreflightRows.value
+  for (let i = 0; i < rows.length; i += CONCURRENCY) {
+    const batch = rows.slice(i, i + CONCURRENCY)
+    await Promise.all(batch.map(async (row) => {
+      const { ok, risk } = await fetchMessagesAndDetectRisk(row.accountId)
+      row.cls = !ok ? 'fail' : (risk ? 'risk' : 'ok')
+    }))
+  }
+  try { await reloadAccounts() } catch (_) {}
+  patientPreflightLoading.value = false
+}
+
+function cancelPatientPreflight() {
+  patientPreflightDialog.value  = false
+  patientPreflightTargets.value = []
+  patientPreflightRows.value    = []
+}
+
+// 阶段二确认 → 阶段三：在进度窗执行添加（mode: 'skip' 仅正常 / 'all' 全部）
+async function confirmPatientPreflight(mode) {
+  const rows = patientPreflightRows.value
+  const clsOf = {}
+  rows.forEach(r => { clsOf[r.accountId] = r.cls })
+  const targets = patientPreflightTargets.value
+  patientPreflightDialog.value = false
+  if (targets.length === 0) return
+
+  const skipAccts = mode === 'all' ? [] : targets.filter(a => clsOf[a.id] !== 'ok')
+  const addAccts  = mode === 'all' ? targets : targets.filter(a => clsOf[a.id] === 'ok')
+  const skipMsg = (a) => clsOf[a.id] === 'risk' ? '已跳过(风控)' : '已跳过(获取消息失败)'
+
+  if (addAccts.length === 0) { ElMessage.info('没有可添加的账号'); return }
+
+  batchProgressOp.value = '批量添加患者'
+  batchProgressItems.value = [
+    ...addAccts.map(a => ({ accountId: a.id, mobile: a.mobile, status: 'pending', msg: '' })),
+    ...skipAccts.map(a => ({ accountId: a.id, mobile: a.mobile, status: 'skipped', msg: skipMsg(a) })),
+  ]
   batchProgressDialog.value = true
   batchRunning.value = true
 
   const CONCURRENCY = 25
-  const items = batchProgressItems.value
-  for (let i = 0; i < items.length; i += CONCURRENCY) {
-    const batch = items.slice(i, i + CONCURRENCY)
+  const addItems = batchProgressItems.value.filter(it => it.status === 'pending')
+  for (let i = 0; i < addItems.length; i += CONCURRENCY) {
+    const batch = addItems.slice(i, i + CONCURRENCY)
     batch.forEach(item => { item.status = 'running' })
     await Promise.all(batch.map(async (item) => {
       try {
@@ -3291,6 +3616,7 @@ onMounted(loadAll)
 }
 .proxy-stat-row:last-child { border-bottom: none; }
 .proxy-row-risk { background: rgba(245,108,108,.1) !important; border-radius: 2px; }
+.preflight-risky-row td { background: #fef0f0 !important; }
 .proxy-risk-flag { color: #f56c6c; font-weight: 600; font-size: 10px; flex-shrink: 0; }
 .proxy-ip   { color: #7ec8e3; min-width: 150px; flex-shrink: 0; }
 .proxy-cfg-btn {

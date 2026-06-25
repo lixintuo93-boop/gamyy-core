@@ -1,1 +1,0 @@
-import{M as s}from"./MainLayout-CiJ__zlM.js";import{_ as r,o as t,c as o,w as c,f as a}from"./index-Cp7j752S.js";const _={__name:"Logs",setup(n){return(f,e)=>(t(),o(s,null,{default:c(()=>[...e[0]||(e[0]=[a("div",{class:"viewer-wrap"},[a("iframe",{src:"/channel-viewer.html",class:"viewer-frame"})],-1)])]),_:1}))}},p=r(_,[["__scopeId","data-v-9496c83f"]]);export{p as default};
