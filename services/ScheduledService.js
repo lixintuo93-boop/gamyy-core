@@ -838,7 +838,8 @@ class ScheduledService {
           const ace = ph1.autoCloseExcess;
           lines.push(`         自动关闭多余: max=${ace.maxSuccessChannels ?? 'auto'}，monitorInterval=${ace.monitorInterval ?? 0}ms`);
         }
-        lines.push(`    查号: ${ck.startTime || '—'} 开始，窗口${ckWinSec}s，最多${ckMaxN}次，分布:${ck.distribution || 'uniform'}，停止阈值:${ck.stopAfterFoundCount ?? 3}`);
+        const gswSec = ck.greedySpreadWindow == null ? '默认30' : (ck.greedySpreadWindow > 0 ? `${ck.greedySpreadWindow / 1000}` : '整窗');
+        lines.push(`    查号: ${ck.startTime || '—'} 开始，窗口${ckWinSec}s，最多${ckMaxN}次，分布:${ck.distribution || 'uniform'}，停止阈值:${ck.stopAfterFoundCount ?? 3}，存活通道摊开:${gswSec}s`);
         lines.push(`         模式:${pCfg.checkMode || 'doctor'}${pCfg.checkMode === 'dept' ? `（科室:${pCfg.deptQueryParams?.deptCode || '—'}）` : `（医生来源:${pCfg.doctorSource || 'config'}/${pCfg.doctorSelectMode || 'random'}）`}`);
         if (reuse.enabled) {
           lines.push(`         通道复用: 启用，最小间隔${reuse.minInterval || 0}ms，超时:${reuse.reuseOnTimeout ? '复用' : '不复用'}，错误:${reuse.reuseOnError ? '复用' : '不复用'}`);

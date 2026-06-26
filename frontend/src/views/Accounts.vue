@@ -264,6 +264,7 @@
                       <span class="proxy-ch" :title="cfg.checkMode.title">{{ cfg.checkMode.value }}</span>
                       <span class="proxy-ch task-meta-mono" :class="{ 'proxy-ch-ov': cfg.startTime.override }" title="查票开始时间">{{ cfg.startTime.value || '—' }}</span>
                       <span class="proxy-ch" :class="{ 'proxy-ch-ov': cfg.windowTime.override }" title="查票窗口">窗:{{ msToDisp(cfg.windowTime.value) }}</span>
+                      <span class="proxy-ch" :class="{ 'proxy-ch-ov': cfg.greedySpread.override }" title="存活通道摊开窗口">摊:{{ cfg.greedySpread.value > 0 ? msToDisp(cfg.greedySpread.value) : (cfg.greedySpread.value === 0 ? '整窗' : '—') }}</span>
                       <span class="proxy-ch" :class="{ 'proxy-ch-ov': cfg.stopAfter.override }" title="找到几次后停止">×{{ fmtStopShort(cfg.stopAfter.value) }}</span>
                       <!-- 锁号段 -->
                       <span v-if="cfg.lockStart.value" class="proxy-ch task-meta-mono" :class="{ 'proxy-ch-ov': cfg.lockStart.override }" title="锁号开始时间">锁开:{{ cfg.lockStart.value }}</span>
@@ -1018,6 +1019,10 @@
             <el-form-item label="最小间隔(ms)">
               <el-input-number v-model="proxyOverrideForm.check_min_interval" :min="50" :step="50" controls-position="right" style="width:150px" />
             </el-form-item>
+            <el-form-item label="存活通道摊开窗口(ms)">
+              <el-input-number v-model="proxyOverrideForm.check_greedy_spread_window" :min="0" :step="1000" controls-position="right" style="width:150px" />
+              <span class="proxy-cfg-hint">{{ proxyOverrideForm.check_greedy_spread_window > 0 ? msToSec(proxyOverrideForm.check_greedy_spread_window) + '内密集发完开窗存活通道，余下窗口交给即连即打/复用' : '0=摊满整个查票窗口(旧行为)' }}</span>
+            </el-form-item>
             <el-form-item label="时间分布">
               <el-radio-group v-model="proxyOverrideForm.check_distribution">
                 <el-radio value="uniform">均匀</el-radio>
@@ -1279,6 +1284,7 @@ const proxyOverrideForm     = reactive({
   check_min_interval: 250,
   check_distribution: 'uniform',
   check_stop_after_found_count: 3,
+  check_greedy_spread_window: 30000,
   // 按医生子树
   doctor_source: 'config',
   doctor_select_mode: 'random',
@@ -1485,6 +1491,7 @@ function fillFormFromProxy(proxy) {
   proxyOverrideForm.check_min_interval           = pickNum(proxy.check_min_interval, eff.check_min_interval, 250)
   proxyOverrideForm.check_distribution           = pickStr(proxy.check_distribution, eff.check_distribution, 'uniform') || 'uniform'
   proxyOverrideForm.check_stop_after_found_count = pickNum(proxy.check_stop_after_found_count, eff.check_stop_after_found_count, 3)
+  proxyOverrideForm.check_greedy_spread_window   = pickNum(proxy.check_greedy_spread_window, eff.check_greedy_spread_window, 30000)
   // 按医生子树
   proxyOverrideForm.doctor_source                = pickStr(proxy.doctor_source, eff.doctor_source, 'config') || 'config'
   proxyOverrideForm.doctor_select_mode           = pickStr(proxy.doctor_select_mode, eff.doctor_select_mode, 'random') || 'random'
@@ -1637,6 +1644,7 @@ async function saveProxyOverride() {
       check_min_interval:           proxyOverrideForm.check_min_interval,
       check_distribution:           proxyOverrideForm.check_distribution,
       check_stop_after_found_count: proxyOverrideForm.check_stop_after_found_count,
+      check_greedy_spread_window:   proxyOverrideForm.check_greedy_spread_window,
       // 通道复用 JSON
       check_reuse_channel:          reuseConfig,
       // 按医生子树
@@ -1697,6 +1705,7 @@ function getEffectiveCfg(task, proxy) {
     },
     startTime:  { value: eff.check_start_time || '',     override: overrideOf('check_start_time') },
     windowTime: { value: eff.check_window_time,          override: overrideOf('check_window_time') },
+    greedySpread: { value: eff.check_greedy_spread_window, override: overrideOf('check_greedy_spread_window') },
     stopAfter:  { value: eff.check_stop_after_found_count ?? 3, override: overrideOf('check_stop_after_found_count') },
     // 锁号
     lockStart:  { value: eff.lock_config?.lockStartTime || '', override: !!(lk.lockStartTime) },

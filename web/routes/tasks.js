@@ -363,6 +363,9 @@ function resolveProxyEffectiveConfig(sys, proxy, tmpl) {
       minInterval:         pick('check_min_interval'),
       distribution:        pick('check_distribution'),
       stopAfterFoundCount: pick('check_stop_after_found_count') ?? 3,
+      // 🆕 贪心"摊开窗口"(ms)：仅约束开窗存活通道的首发铺开跨度，与 windowTime(捕获窗口)解耦。
+      // 缺列(旧库未迁移)时 pickInt 返回 null → 引擎用 DEFAULT_GREEDY_SPREAD_WINDOW 兜底。
+      greedySpreadWindow:  pickInt('check_greedy_spread_window', null),
       reuseChannel:        reuseCh,
     },
     lockRequest:            { global: lockCfg },

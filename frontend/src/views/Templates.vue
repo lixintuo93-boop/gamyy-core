@@ -41,6 +41,7 @@
               <span class="k">查票</span><span class="v mono time-sm">{{ fmtTimeSec(row.check_start_time) || '—' }}</span>
               <span class="k">窗口</span><span class="v">{{ msToSec(row.check_window_time) || '—' }}</span>
               <span class="k">间隔</span><span class="v">{{ row.check_min_interval ?? '—' }} ms</span>
+              <span class="k">摊开</span><span class="v">{{ row.check_greedy_spread_window > 0 ? msToSec(row.check_greedy_spread_window) : (row.check_greedy_spread_window === 0 ? '整窗' : '—') }}</span>
               <span class="k">停止</span><span class="v">{{ fmtStopCount(row.check_stop_after_found_count) }}</span>
               <span class="k">模式</span><span class="v">{{ row.check_mode === 'dept' ? '按科室' : '按医生' }}</span>
               <span class="k">复用</span>
@@ -97,7 +98,7 @@
 
     <!-- 模板编辑 -->
     <el-dialog v-model="dialog" :title="editing?.id ? '编辑代理模板' : '新建代理模板'" width="720px">
-      <el-form :model="form" label-width="130px">
+      <el-form :model="form" label-width="160px">
         <el-form-item label="模板名称" required><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="描述"><el-input v-model="form.description" /></el-form-item>
 
@@ -173,6 +174,10 @@
             </el-form-item>
             <el-form-item label="最小间隔(ms)">
               <el-input-number v-model="form.check_min_interval" :min="50" :step="50" />
+            </el-form-item>
+            <el-form-item label="存活通道摊开窗口(ms)">
+              <el-input-number v-model="form.check_greedy_spread_window" :min="0" :step="1000" />
+              <span class="tmpl-hint">{{ form.check_greedy_spread_window > 0 ? msToSec(form.check_greedy_spread_window) + '内密集发完开窗存活通道' : '0=摊满整个查票窗口(旧行为)' }}</span>
             </el-form-item>
             <el-form-item label="时间分布">
               <el-radio-group v-model="form.check_distribution">
@@ -376,7 +381,7 @@ function parseField(field) {
 const form = reactive({
   name: '', description: '',
   check_start_time: '', check_window_time: 10000, check_min_interval: 250,
-  check_distribution: 'uniform', check_stop_after_found_count: 3,
+  check_distribution: 'uniform', check_stop_after_found_count: 3, check_greedy_spread_window: 30000,
   reuseChannel: { enabled: false, minInterval: 1000, reuseOnTimeout: false, reuseOnError: false },
   lockCfg: { reservedChannels: 0, lockStartTime: '', firstLockDelayMs: 0, windowTime: 20000, minInterval: 250, directRequestOnNoChannel: false, submitSignStrategy: 'rotate' },
   channelCfg: { startTime: '', windowTime: 270000, attempts: 200, distribution: 'uniform', maxSuccessChannels: 0 },
@@ -481,6 +486,7 @@ function openTmpl(row = null) {
     check_min_interval: src?.check_min_interval || 250,
     check_distribution: src?.check_distribution || 'uniform',
     check_stop_after_found_count: src?.check_stop_after_found_count ?? 3,
+    check_greedy_spread_window: src?.check_greedy_spread_window ?? 30000,
     check_mode: src?.check_mode || 'doctor',
     doctor_source: src?.doctor_source || 'config',
     doctor_select_mode: src?.doctor_select_mode || 'random',
@@ -539,6 +545,7 @@ async function saveTmpl() {
     check_min_interval: form.check_min_interval,
     check_distribution: form.check_distribution,
     check_stop_after_found_count: form.check_stop_after_found_count,
+    check_greedy_spread_window: form.check_greedy_spread_window,
     check_reuse_channel: { ...form.reuseChannel },
     lock_config: { ...form.lockCfg, lockStartTime: lockMode.value === 'immediate' ? '' : form.lockCfg.lockStartTime },
     channel_build_overrides: {

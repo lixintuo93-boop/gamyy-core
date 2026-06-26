@@ -1,0 +1,1 @@
+import{M as s}from"./MainLayout-B-k8HKbR.js";import{_ as r,o as t,c as o,w as c,f as e}from"./index-CAXpCRLR.js";const _={__name:"Logs",setup(n){return(f,a)=>(t(),o(s,null,{default:c(()=>[...a[0]||(a[0]=[e("div",{class:"viewer-wrap"},[e("iframe",{src:"/channel-viewer.html",class:"viewer-frame"})],-1)])]),_:1}))}},p=r(_,[["__scopeId","data-v-36db6fda"]]);export{p as default};

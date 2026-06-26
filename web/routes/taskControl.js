@@ -305,6 +305,7 @@ router.get('/:id/proxies', (req, res) => {
           check_min_interval:           eff.checkRequest?.minInterval ?? null,
           check_distribution:           eff.checkRequest?.distribution ?? null,
           check_stop_after_found_count: eff.checkRequest?.stopAfterFoundCount ?? 3,
+          check_greedy_spread_window:   eff.checkRequest?.greedySpreadWindow ?? null,
           check_reuse_channel:          eff.checkRequest?.reuseChannel ?? null,
           lock_config:                  eff.lockRequest?.global ?? {},
           channel_build_overrides:      eff.channelBuildPhase1 ?? {},

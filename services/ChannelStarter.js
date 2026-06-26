@@ -17,6 +17,10 @@ const CHANNEL_STARTER_CONSTANTS = {
   CHANNEL_PROGRESS_INTERVAL: 10,
 };
 
+// 🆕 贪心"摊开窗口"默认值(ms)：当 checkRequest.greedySpreadWindow 未配置(null/undefined)时使用。
+// 仅约束"开窗瞬间已存活通道"的首发铺开跨度，与捕获窗口(checkRequest.windowTime)无关。
+const DEFAULT_GREEDY_SPREAD_WINDOW = 30000;
+
 class ChannelStarter {
   constructor(ticketService, accountManager, channelManager, config) {
     this.config = config;
@@ -183,16 +187,36 @@ class ChannelStarter {
       }
 
       // 5. 根据查票通道数量生成时间槽
+      //
+      // 🆕 「摊开窗口」(greedySpreadWindow) 与「捕获窗口」(effectiveWindowTime) 解耦：
+      //   - effectiveWindowTime = checkWindowEnd - slotStart，通常很长（覆盖到服务器 RST 恢复期尾巴），
+      //     负责让窗口内"即连即打"和通道复用在整段时间内持续有效；
+      //   - 但开窗瞬间已存活的少量通道若按整段长窗口铺开，会被稀释成"每几分钟一枪"
+      //     （少通道 + 长窗口 → interval = 长窗口/通道数，极稀疏）。
+      //   greedySpreadWindow 只约束这批"开窗存活通道"的首发铺开跨度：把它们前置压在窗口前段，
+      //   剩余的长窗口交给即连即打/复用补满。语义：
+      //     >0  → 铺开跨度 = min(greedySpreadWindow, effectiveWindowTime)；
+      //     =0  → 退化为旧行为（铺满整个 effectiveWindowTime）；
+      //     未配置(null/undefined) → 用 DEFAULT_GREEDY_SPREAD_WINDOW。
       const slotCount = checkChannels.length;
       const distribution = checkReq.distribution || 'uniform';
       const slots = [];
-      let interval = Math.floor(effectiveWindowTime / slotCount);  // 计算平均间隔（用于记录）
+
+      const rawGSW = checkReq.greedySpreadWindow;
+      const greedySpreadWindow = (rawGSW == null) ? DEFAULT_GREEDY_SPREAD_WINDOW : rawGSW;
+      const spreadSpan = (greedySpreadWindow > 0)
+        ? Math.min(greedySpreadWindow, effectiveWindowTime)
+        : effectiveWindowTime;
+
+      // 平均间隔以 minInterval 为下限（防风控）：通道少时挤在 spreadSpan 内、不再稀释到整窗；
+      // 通道多到 spreadSpan 容不下时退回 minInterval 等间距（仍 ≤ effectiveWindowTime，见 neededChannels 裁剪）。
+      let interval = Math.max(checkReq.minInterval || 1, Math.floor(spreadSpan / slotCount));
 
       if (distribution === 'random') {
-        // 随机分布：在窗口期内随机生成时间点，然后排序
+        // 随机分布：在「摊开窗口」内随机生成时间点，然后排序
         const randomTimes = [];
         for (let i = 0; i < slotCount; i++) {
-          randomTimes.push(slotStart + Math.floor(Math.random() * effectiveWindowTime));
+          randomTimes.push(slotStart + Math.floor(Math.random() * spreadSpan));
         }
         // 按时间排序，确保贪心分配时按时间顺序处理
         randomTimes.sort((a, b) => a - b);
@@ -206,7 +230,7 @@ class ChannelStarter {
           });
         }
       } else {
-        // 均匀分布（默认）：等间隔生成时间点
+        // 均匀分布（默认）：在「摊开窗口」内等间隔生成时间点
         for (let i = 0; i < slotCount; i++) {
           slots.push({
             index: i,
@@ -244,7 +268,7 @@ class ChannelStarter {
       scheduler.maxRequests = assignments.length;
       scheduler.interval = interval;
 
-      console.log(`✅ [DBG-greedy] ${proxyKey}: scheduling ${assignments.length} check timers, window=[${new Date(slotStart).toLocaleTimeString('zh-CN', {hour12:false})} ~ ${new Date(checkWindowEnd).toLocaleTimeString('zh-CN', {hour12:false})}]`);
+      console.log(`✅ [DBG-greedy] ${proxyKey}: scheduling ${assignments.length} check timers, 存活通道${slotCount}个铺开于前${Math.round(spreadSpan/1000)}s(间隔${interval}ms), 捕获窗口=[${new Date(slotStart).toLocaleTimeString('zh-CN', {hour12:false})} ~ ${new Date(checkWindowEnd).toLocaleTimeString('zh-CN', {hour12:false})}]`);
 
       // 7. 设置定时器
       console.log(`🔧 [DBG-tick] ${proxyKey}: about to call setTimeout x${assignments.length}, delays=[${assignments.map(a => a.time - now).slice(0,5).join(',')}${assignments.length > 5 ? ',...' : ''}]ms`);

@@ -251,6 +251,18 @@ function runMigrations(db) {
     db.prepare("ALTER TABLE proxies ADD COLUMN ops_enabled INTEGER NOT NULL DEFAULT 0").run();
   }
 
+  // ===== 贪心"摊开窗口" greedySpreadWindow：解耦开窗存活通道首发铺开跨度 与 捕获窗口 =====
+  // proxy_templates：NOT NULL DEFAULT 30000（兜底地板，现存模板含"默认配置"一并回填为 30000）
+  // proxies：可空（NULL = 跟随模板）
+  const tmplGswCols = db.prepare("PRAGMA table_info(proxy_templates)").all().map(c => c.name);
+  if (!tmplGswCols.includes('check_greedy_spread_window')) {
+    db.prepare("ALTER TABLE proxy_templates ADD COLUMN check_greedy_spread_window INTEGER NOT NULL DEFAULT 30000").run();
+  }
+  const proxyGswCols = db.prepare("PRAGMA table_info(proxies)").all().map(c => c.name);
+  if (!proxyGswCols.includes('check_greedy_spread_window')) {
+    db.prepare("ALTER TABLE proxies ADD COLUMN check_greedy_spread_window INTEGER").run();
+  }
+
   const acctCols = db.prepare("PRAGMA table_info(accounts)").all().map(c => c.name);
   if (!acctCols.includes('ops_proxy_id')) {
     db.prepare("ALTER TABLE accounts ADD COLUMN ops_proxy_id INTEGER REFERENCES proxies(id) ON DELETE SET NULL").run();
@@ -626,13 +638,13 @@ function seedDefaultProxyTemplate(db) {
     INSERT INTO proxy_templates
       (name, description,
        check_mode, check_start_time, check_window_time, check_min_interval,
-       check_distribution, check_stop_after_found_count,
+       check_distribution, check_stop_after_found_count, check_greedy_spread_window,
        check_reuse_channel, lock_config, channel_build_overrides,
        doctor_source, doctor_select_mode, doctor_codes)
     VALUES
       (@name, @description,
        @check_mode, @check_start_time, @check_window_time, @check_min_interval,
-       @check_distribution, @check_stop_after_found_count,
+       @check_distribution, @check_stop_after_found_count, @check_greedy_spread_window,
        @check_reuse_channel, @lock_config, @channel_build_overrides,
        @doctor_source, @doctor_select_mode, @doctor_codes)
     ON CONFLICT(name) DO UPDATE SET
@@ -647,6 +659,7 @@ function seedDefaultProxyTemplate(db) {
     check_min_interval:           250,
     check_distribution:           'random',
     check_stop_after_found_count: 3,
+    check_greedy_spread_window:   30000,
     check_reuse_channel:          JSON.stringify(reuseChannel),
     lock_config:                  JSON.stringify(lockConfig),
     channel_build_overrides:      JSON.stringify(channelBuildConfig),

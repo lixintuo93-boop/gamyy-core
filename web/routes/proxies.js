@@ -62,6 +62,7 @@ function parseWithEffective(db, row) {
       check_min_interval:           eff.checkRequest.minInterval,
       check_distribution:           eff.checkRequest.distribution,
       check_stop_after_found_count: eff.checkRequest.stopAfterFoundCount,
+      check_greedy_spread_window:   eff.checkRequest.greedySpreadWindow,
       check_reuse_channel:          eff.checkRequest.reuseChannel,
       lock_config:                  eff.lockRequest.global,
       channel_build_overrides:      eff.channelBuildPhase1,
@@ -134,6 +135,7 @@ router.patch('/:id/template', (req, res) => {
       check_min_interval = @check_min_interval,
       check_distribution = @check_distribution,
       check_stop_after_found_count = @check_stop_after_found_count,
+      check_greedy_spread_window = @check_greedy_spread_window,
       check_reuse_channel = @check_reuse_channel,
       lock_config = @lock_config,
       channel_build_overrides = @channel_build_overrides,
@@ -161,6 +163,7 @@ router.patch('/:id/template', (req, res) => {
       check_min_interval:           tmpl.check_min_interval,
       check_distribution:           tmpl.check_distribution,
       check_stop_after_found_count: tmpl.check_stop_after_found_count,
+      check_greedy_spread_window:   tmpl.check_greedy_spread_window,
       check_reuse_channel:          tmpl.check_reuse_channel,
       lock_config:                  tmpl.lock_config,
       channel_build_overrides:      tmpl.channel_build_overrides,
@@ -201,6 +204,7 @@ router.post('/batch/apply-template', (req, res) => {
       check_min_interval = @check_min_interval,
       check_distribution = @check_distribution,
       check_stop_after_found_count = @check_stop_after_found_count,
+      check_greedy_spread_window = @check_greedy_spread_window,
       check_reuse_channel = @check_reuse_channel,
       lock_config = @lock_config,
       channel_build_overrides = @channel_build_overrides,
@@ -229,6 +233,7 @@ router.post('/batch/apply-template', (req, res) => {
       check_min_interval:           tmpl.check_min_interval,
       check_distribution:           tmpl.check_distribution,
       check_stop_after_found_count: tmpl.check_stop_after_found_count,
+      check_greedy_spread_window:   tmpl.check_greedy_spread_window,
       check_reuse_channel:          tmpl.check_reuse_channel,
       lock_config:                  tmpl.lock_config,
       channel_build_overrides:      tmpl.channel_build_overrides,
@@ -300,6 +305,7 @@ router.put('/:id/config', (req, res) => {
     setIfPresent('check_min_interval');
     setIfPresent('check_distribution');
     setIfPresent('check_stop_after_found_count', v => v != null ? parseInt(v) : null);
+    setIfPresent('check_greedy_spread_window',   v => v != null ? parseInt(v) : null);
     setIfPresent('check_reuse_channel',          v => v != null ? JSON.stringify(v) : null);
     setIfPresent('lock_config',                  v => v != null ? JSON.stringify(v) : null);
     // channel_build_overrides 列声明为 NOT NULL DEFAULT '{}'，null 时落 '{}'

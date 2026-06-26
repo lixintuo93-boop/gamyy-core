@@ -72,9 +72,18 @@ module.exports = {
   // ==================== 查票请求配置 ====================
   checkRequest: {
     startTime: "14:59:50.000",          // 查票开始时间（绝对时间）
-    windowTime: 10000,                  // 查票窗口时长(ms)，窗口终点 = startTime + windowTime
+    windowTime: 10000,                  // 查票窗口时长(ms)，窗口终点 = startTime + windowTime（"捕获窗口"：即连即打/复用在整段内有效）
     minInterval: 250,                   // 最小请求间隔(ms)，约束最大查票次数，防风控
     distribution: 'random',            // 时间槽分布方式: 'uniform'=均匀分布, 'random'=随机分布
+
+    // 🆕 贪心"摊开窗口"(ms)：仅约束"开窗瞬间已存活通道"的首发铺开跨度，与 windowTime(捕获窗口)解耦。
+    //   背景：windowTime 常被拉得很长(覆盖服务器 RST 恢复期)，但开窗时只剩几个存活通道时，
+    //   旧逻辑把这几个通道按"窗口/通道数"摊到整段长窗口 → 每隔几分钟才发一枪，极度稀疏。
+    //   greedySpreadWindow 把这批存活通道压在窗口前 N ms 内密集发完(间隔以 minInterval 为下限)，
+    //   剩余长窗口交给"即连即打 + 通道复用"补满。
+    //   语义：>0 → 铺开跨度 = min(greedySpreadWindow, 剩余捕获窗口)；
+    //         =0 → 旧行为(摊满整个捕获窗口)；省略 → 引擎默认 30000。
+    greedySpreadWindow: 30000,
     
     // 🆕 通道复用配置
     reuseChannel: {
