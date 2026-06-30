@@ -65,6 +65,8 @@ export const startTask           = (id)   => http.post(`/tasks/${id}/start`, nul
 export const stopTask            = (id)   => http.post(`/tasks/${id}/stop`, null, { timeout: 120000 })
 export const getTaskStatus       = (id)   => http.get(`/tasks/${id}/status`)
 export const getRunningTasks     = ()     => http.get('/tasks/running')
+// 当前任务代理池统计（总/已分配/剩余，含所有代理类型，与分配口径一致）
+export const getTaskProxyPoolStats = ()   => http.get('/tasks/proxy-pool-stats')
 export const getTaskProxies      = (id)   => http.get(`/tasks/${id}/proxies`)
 export const getTaskProxyStats   = (id)   => http.get(`/tasks/${id}/proxy-stats`)
 // 方案 C：任务级代理分配——把任务代理数调整到 count（不足从全局空闲池补，多余释放）

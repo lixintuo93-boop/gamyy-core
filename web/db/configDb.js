@@ -60,6 +60,14 @@ function runMigrations(db) {
       console.log('📦 迁移: tasks 表添加 proxy_max_count 列（代理改任务级归属）...');
       db.prepare("ALTER TABLE tasks ADD COLUMN proxy_max_count INTEGER").run();
     }
+    if (!taskCols.includes('proxy_template_ids')) {
+      console.log('📦 迁移: tasks 表添加 proxy_template_ids 列（持久化模板组）...');
+      db.prepare("ALTER TABLE tasks ADD COLUMN proxy_template_ids TEXT").run();
+    }
+    if (!taskCols.includes('proxy_template_offset')) {
+      console.log('📦 迁移: tasks 表添加 proxy_template_offset 列（模板轮转基准偏移）...');
+      db.prepare("ALTER TABLE tasks ADD COLUMN proxy_template_offset INTEGER NOT NULL DEFAULT 0").run();
+    }
   }
 
   db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_account_id ON tasks(account_id)");

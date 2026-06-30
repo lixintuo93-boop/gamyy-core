@@ -63,7 +63,9 @@ router.post('/', (req, res) => {
 
     const sysRow = db.prepare('SELECT default_proxy_max_count FROM system_config WHERE id = 1').get();
     const defaultCount = sysRow?.default_proxy_max_count ?? 10;
-    const desiredCount = Number.isInteger(b.proxy_max_count) && b.proxy_max_count > 0
+    // proxy_max_count 是“分配给该任务的最大代理数”：>=0 即按传入值（0 = 暂不分配），
+    // 缺省/非法才回落系统默认。注意必须用 >=0，否则 0 会被当作 falsy 回落默认值。
+    const desiredCount = Number.isInteger(b.proxy_max_count) && b.proxy_max_count >= 0
       ? b.proxy_max_count : defaultCount;
 
     const autoName = b.name || `task_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
@@ -73,15 +75,20 @@ router.post('/', (req, res) => {
 
     db.transaction(() => {
       const result = db.prepare(`INSERT INTO tasks
-        (name, enabled, account_id, doctor_code, lock_plan_date, patient_id, proxy_max_count)
-        VALUES (@name, @enabled, @account_id, @doctor_code, @lock_plan_date, @patient_id, @proxy_max_count)`).run({
-        name:            autoName,
-        enabled:         b.enabled !== false ? 1 : 0,
-        account_id:      b.account_id ?? null,
-        doctor_code:     b.doctor_code ?? null,
-        lock_plan_date:  b.lock_plan_date ?? null,
-        patient_id:      b.patient_id ?? null,
-        proxy_max_count: desiredCount,
+        (name, enabled, account_id, doctor_code, lock_plan_date, patient_id, proxy_max_count,
+         proxy_template_ids, proxy_template_offset)
+        VALUES (@name, @enabled, @account_id, @doctor_code, @lock_plan_date, @patient_id, @proxy_max_count,
+         @proxy_template_ids, @proxy_template_offset)`).run({
+        name:                  autoName,
+        enabled:               b.enabled !== false ? 1 : 0,
+        account_id:            b.account_id ?? null,
+        doctor_code:           b.doctor_code ?? null,
+        lock_plan_date:        b.lock_plan_date ?? null,
+        patient_id:            b.patient_id ?? null,
+        proxy_max_count:       desiredCount,
+        // 持久化创建时选定的模板组与基准偏移，供后续增补/编辑代理沿用
+        proxy_template_ids:    templateIds.length > 0 ? JSON.stringify(templateIds) : null,
+        proxy_template_offset: offset,
       });
       lastInsertRowid = result.lastInsertRowid;
 
@@ -121,6 +128,23 @@ router.get('/running', (req, res) => {
   }
 });
 
+// GET /api/tasks/proxy-pool-stats
+// 当前任务代理池：总 / 已分配 / 剩余。口径与 grabFreeProxies 完全一致——
+// 含所有代理类型（标准 + SSH 隧道等），只看 enabled(任务启用) 与是否已被任务占用。
+router.get('/proxy-pool-stats', (req, res) => {
+  try {
+    const db = getDb();
+    const total = db.prepare('SELECT COUNT(*) AS n FROM proxies WHERE enabled = 1').get().n;
+    const free = db.prepare(`
+      SELECT COUNT(*) AS n FROM proxies
+      WHERE enabled = 1 AND id NOT IN (SELECT proxy_id FROM task_proxies)
+    `).get().n;
+    ok(res, { total, assigned: total - free, free });
+  } catch (e) {
+    err(res, e.message, 500);
+  }
+});
+
 // GET /api/tasks/:id
 router.get('/:id', (req, res) => {
   try {
@@ -140,25 +164,56 @@ router.put('/:id', (req, res) => {
   try {
     const b = req.body;
     const db = getDb();
-    if (!db.prepare('SELECT id FROM tasks WHERE id = ?').get(req.params.id)) return err(res, '任务不存在', 404);
-    db.prepare(`UPDATE tasks SET
-      name = COALESCE(@name, name),
-      enabled = COALESCE(@enabled, enabled),
-      account_id = COALESCE(@account_id, account_id),
-      doctor_code = COALESCE(@doctor_code, doctor_code),
-      lock_plan_date = COALESCE(@lock_plan_date, lock_plan_date),
-      patient_id = COALESCE(@patient_id, patient_id),
-      updated_at = @updated_at
-      WHERE id = @id`).run({
-      id:             req.params.id,
-      name:           b.name ?? null,
-      enabled:        b.enabled != null ? (b.enabled ? 1 : 0) : null,
-      account_id:     b.account_id ?? null,
-      doctor_code:    b.doctor_code ?? null,
-      lock_plan_date: b.lock_plan_date ?? null,
-      patient_id:     b.patient_id ?? null,
-      updated_at:     now(),
-    });
+    const taskId = Number(req.params.id);
+    const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+    if (!task) return err(res, '任务不存在', 404);
+
+    // 是否在改模板组：仅当请求体显式出现 proxy_template_ids 时才走重应用，避免普通改名误触发
+    const editingTemplates = Array.isArray(b.proxy_template_ids);
+    if (editingTemplates && isTaskRunning(req, taskId)) {
+      return err(res, '任务运行中，请先停止后再修改模板组', 400);
+    }
+    const newTemplateIds = editingTemplates ? b.proxy_template_ids.filter(Boolean) : null;
+    const baseOffset = Number.isInteger(b.proxy_template_offset)
+      ? b.proxy_template_offset
+      : (Number.isInteger(task.proxy_template_offset) ? task.proxy_template_offset : 0);
+
+    db.transaction(() => {
+      db.prepare(`UPDATE tasks SET
+        name = COALESCE(@name, name),
+        enabled = COALESCE(@enabled, enabled),
+        account_id = COALESCE(@account_id, account_id),
+        doctor_code = COALESCE(@doctor_code, doctor_code),
+        lock_plan_date = COALESCE(@lock_plan_date, lock_plan_date),
+        patient_id = COALESCE(@patient_id, patient_id),
+        proxy_template_ids = CASE WHEN @edit_tmpl = 1 THEN @proxy_template_ids ELSE proxy_template_ids END,
+        proxy_template_offset = CASE WHEN @edit_tmpl = 1 THEN @proxy_template_offset ELSE proxy_template_offset END,
+        updated_at = @updated_at
+        WHERE id = @id`).run({
+        id:                    taskId,
+        name:                  b.name ?? null,
+        enabled:               b.enabled != null ? (b.enabled ? 1 : 0) : null,
+        account_id:            b.account_id ?? null,
+        doctor_code:           b.doctor_code ?? null,
+        lock_plan_date:        b.lock_plan_date ?? null,
+        patient_id:            b.patient_id ?? null,
+        edit_tmpl:             editingTemplates ? 1 : 0,
+        proxy_template_ids:    editingTemplates && newTemplateIds.length > 0 ? JSON.stringify(newTemplateIds) : null,
+        proxy_template_offset: baseOffset,
+        updated_at:            now(),
+      });
+
+      // 改了模板组 → 把新模板组重新轮转套用到该任务当前全部代理（id ASC，从基准偏移起）
+      if (editingTemplates) {
+        const ids = db.prepare('SELECT proxy_id FROM task_proxies WHERE task_id = ? ORDER BY proxy_id ASC')
+          .all(taskId).map(r => r.proxy_id);
+        if (ids.length > 0) {
+          if (newTemplateIds.length > 0) applyTemplatesRoundRobin(db, ids, newTemplateIds, baseOffset);
+          else resetProxyOverrides(db, ids);
+        }
+      }
+    })();
+
     ok(res, parseTask(db.prepare(`
       SELECT t.*, a.mobile AS account_mobile
       FROM tasks t LEFT JOIN accounts a ON a.id = t.account_id
@@ -206,8 +261,13 @@ router.post('/:id/assign-proxies', (req, res) => {
 
     const target = Number.isInteger(req.body.count) && req.body.count >= 0 ? req.body.count : null;
     if (target == null) return err(res, 'count 不合法', 400);
-    let templateIds = Array.isArray(req.body.proxy_template_ids) ? req.body.proxy_template_ids.filter(Boolean) : [];
-    const offset = Number.isInteger(req.body.proxy_template_offset) ? req.body.proxy_template_offset : 0;
+    // 请求显式带模板 → 以请求为准；否则回退到任务创建时持久化的模板组
+    const reqHasTemplates = Array.isArray(req.body.proxy_template_ids);
+    let templateIds = reqHasTemplates ? req.body.proxy_template_ids.filter(Boolean) : parseTemplateIds(task.proxy_template_ids);
+    // 基准偏移：请求显式给则用之，否则用任务持久化的基准
+    const baseOffset = Number.isInteger(req.body.proxy_template_offset)
+      ? req.body.proxy_template_offset
+      : (Number.isInteger(task.proxy_template_offset) ? task.proxy_template_offset : 0);
 
     let assigned = 0, released = 0;
     db.transaction(() => {
@@ -220,7 +280,8 @@ router.post('/:id/assign-proxies', (req, res) => {
         const insertTP = db.prepare('INSERT OR IGNORE INTO task_proxies (task_id, proxy_id) VALUES (?, ?)');
         for (const id of ids) insertTP.run(taskId, id);
         if (ids.length > 0) {
-          if (templateIds.length > 0) applyTemplatesRoundRobin(db, ids, templateIds, offset);
+          // 新增代理接着原有顺序轮转：偏移 = 基准 + 已有代理数（用户确认符合预期）
+          if (templateIds.length > 0) applyTemplatesRoundRobin(db, ids, templateIds, baseOffset + current.length);
           else resetProxyOverrides(db, ids);
         }
         assigned = ids.length;
@@ -479,8 +540,18 @@ function resolveProxyEffectiveConfig(sys, proxy, tmpl) {
   };
 }
 
+// 工具：解析任务持久化的 proxy_template_ids（JSON 字符串）→ 数组；非法/空 → []
+function parseTemplateIds(raw) {
+  if (raw == null) return [];
+  try {
+    const v = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(v) ? v.filter(Boolean) : [];
+  } catch { return []; }
+}
+
 function parseTask(row) {
-  return { ...row };
+  if (!row) return row;
+  return { ...row, proxy_template_ids: parseTemplateIds(row.proxy_template_ids) };
 }
 
 module.exports = router;

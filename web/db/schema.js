@@ -180,6 +180,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   patient_id      TEXT,
   -- 任务级代理数（方案 C：代理归属任务而非账号）；NULL = 取系统 default_proxy_max_count
   proxy_max_count INTEGER,
+  -- 建任务时选定的代理模板组（JSON 数组）；NULL/'[]' = 未选模板，增补代理时回落系统默认
+  proxy_template_ids    TEXT,
+  -- 模板轮转基准偏移；新增代理从 (offset + 已有代理数) 接着轮
+  proxy_template_offset INTEGER NOT NULL DEFAULT 0,
   created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );

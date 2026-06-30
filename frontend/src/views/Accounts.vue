@@ -209,6 +209,7 @@
                     <span class="task-doctor">{{ getDoctorDisplay(task) }}</span>
                     <span class="task-date">{{ task.lock_plan_date || '—' }}</span>
                     <span class="task-patient">{{ getPatientName(task) }}</span>
+                    <span class="task-tmpl" title="任务选中的代理模板">模板:{{ getTemplateNames(task) }}</span>
                   </span>
                   <TaskStatusBadge :status="runtimeStatus[task.id]?.status" :stop-reason="runtimeStatus[task.id]?.stopReason" :enabled="task.enabled" />
                 </div>
@@ -374,12 +375,20 @@
             该任务下的代理按代理 ID 顺序轮询应用所选模板（不同代理可拿不同模板）
           </div>
         </el-form-item>
+        <el-form-item label="代理数量">
+          <el-input-number v-model="taskForm.proxy_max_count" :min="0" :controls="true" style="width:140px" />
+          <div style="margin-top:4px;color:#909399;font-size:12px">
+            分配给该任务的最大代理数（0=暂不分配）；空闲不足时先分到现有数量，之后可在任务行「分配」补满。<br>
+            <span class="pool-stat">当前任务代理池：<b class="pool-total">总 {{ poolStats.total }}</b> / <b class="pool-assigned">已分配 {{ poolStats.assigned }}</b> / <b class="pool-free">剩余 {{ poolStats.free }}</b></span>
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="taskDialog = false">取消</el-button>
         <el-button type="primary" :loading="taskSaving" @click="doCreateTask">创建任务</el-button>
       </template>
     </el-dialog>
+
 
     <!-- 批量建任务弹窗 -->
     <el-dialog v-model="batchTaskDialog" title="批量建任务" width="480px" :append-to-body="true">
@@ -430,6 +439,13 @@
           </el-select>
           <div v-if="batchTaskForm.proxy_template_ids.length > 1" style="margin-top:4px;color:#909399;font-size:12px">
             已选 {{ batchTaskForm.proxy_template_ids.length }} 个模板，将轮转分配给 {{ selectedEnabledCount }} 个账号下的代理
+          </div>
+        </el-form-item>
+        <el-form-item label="代理数量">
+          <el-input-number v-model="batchTaskForm.proxy_max_count" :min="0" :controls="true" style="width:140px" />
+          <div style="margin-top:4px;color:#909399;font-size:12px">
+            每个任务分配的最大代理数（统一值，0=暂不分配）；本批共 {{ selectedEnabledCount }} 个任务，串行从同一空闲池领取。<br>
+            <span class="pool-stat">当前任务代理池：<b class="pool-total">总 {{ poolStats.total }}</b> / <b class="pool-assigned">已分配 {{ poolStats.assigned }}</b> / <b class="pool-free">剩余 {{ poolStats.free }}</b></span>
           </div>
         </el-form-item>
       </el-form>
@@ -1221,7 +1237,7 @@ import {
   getTasks, createTask, deleteTask, startTask, stopTask, getRunningTasks,
   getDoctors, getAccountPatients, getTaskProxies, getTaskProxyStats,
   updateProxyConfig,
-  getProxyTemplates, getSystemConfig, getHeartbeatEndpoints,
+  getProxyTemplates, getSystemConfig, getHeartbeatEndpoints, getTaskProxyPoolStats,
   executeAccountOperation, getAccountSourceRecords, getAccountMessages, getAccountRequestLogs,
   generateAccounts, addManualAccount,
   generatePatientInfo,
@@ -1264,6 +1280,19 @@ const statsPollers   = {}
 // ── 系统配置 ──
 const systemHosts = ref([])
 const defaultProxyMaxCount = ref(10)
+
+// ── 当前任务代理池统计（用于建任务时提示 总/已分配/剩余，含所有代理类型）──
+const poolStats = ref({ total: 0, assigned: 0, free: 0 })
+async function loadPoolStats() {
+  try {
+    const r = await getTaskProxyPoolStats()
+    poolStats.value = {
+      total:    r.data?.total ?? 0,
+      assigned: r.data?.assigned ?? 0,
+      free:     r.data?.free ?? 0,
+    }
+  } catch (_) { /* 提示性数据，失败忽略 */ }
+}
 
 // ── 代理覆盖配置对话框 ──
 const proxyOverrideDialog   = ref(false)
@@ -1349,7 +1378,7 @@ function toggleAllProxyEndpoints(all) {
 const taskDialog        = ref(false)
 const taskSaving        = ref(false)
 const taskTargetAccount = ref(null)
-const taskForm    = reactive({ doctor_code: null, lock_plan_date: '', patient_id: null, proxy_template_ids: [] })
+const taskForm    = reactive({ doctor_code: null, lock_plan_date: '', patient_id: null, proxy_template_ids: [], proxy_max_count: 10 })
 const patients    = ref([])
 const patientsLoading = ref(false)
 const doctors     = ref([])
@@ -1439,6 +1468,16 @@ function getDoctorDisplay(task) {
   if (!code) return '—'
   const doc = doctors.value.find(d => d.doctor_code === code)
   return doc ? `${doc.doctor_name}（${code}）` : code
+}
+
+// 任务行显示该任务选中的模板名（按 id 顺序）；未选 → '默认'
+function getTemplateNames(task) {
+  const ids = Array.isArray(task.proxy_template_ids) ? task.proxy_template_ids : []
+  if (!ids.length) return '默认'
+  return ids.map(id => {
+    const t = templates.value.find(x => x.id === id)
+    return t ? t.name : `#${id}`
+  }).join(' / ')
 }
 
 function toggleExpand(accountId) {
@@ -2167,10 +2206,11 @@ async function handleDeleteTask(task) {
 
 async function openCreateTask(acct) {
   taskTargetAccount.value = acct
-  Object.assign(taskForm, { doctor_code: null, lock_plan_date: defaultLockDate(), patient_id: null, proxy_template_ids: [] })
+  Object.assign(taskForm, { doctor_code: null, lock_plan_date: defaultLockDate(), patient_id: null, proxy_template_ids: [], proxy_max_count: defaultProxyMaxCount.value })
   doctorQuery.value = ''
   patients.value    = []
   taskDialog.value  = true
+  loadPoolStats()
   patientsLoading.value = true
   try {
     const res = await getAccountPatients(acct.id)
@@ -2190,6 +2230,7 @@ async function doCreateTask() {
       patient_id:            taskForm.patient_id    || null,
       proxy_template_ids:    taskForm.proxy_template_ids,
       proxy_template_offset: 0,
+      proxy_max_count:       taskForm.proxy_max_count,
     })
     taskDialog.value = false
     ElMessage.success('任务已创建')
@@ -2548,7 +2589,7 @@ async function runBatchStopTasks() {
 
 // ── 批量建任务 ──
 const batchTaskDialog = ref(false)
-const batchTaskForm   = reactive({ doctor_codes: [], lock_plan_date: '', proxy_template_ids: [] })
+const batchTaskForm   = reactive({ doctor_codes: [], lock_plan_date: '', proxy_template_ids: [], proxy_max_count: 10 })
 
 // ── 批量添患者 ──
 const batchPatientDialog  = ref(false)
@@ -2579,9 +2620,10 @@ function openBatchCreateTasks() {
   const ids = [...selectedBatchIds.value]
   const targets = accounts.value.filter(a => ids.includes(a.id) && a.enabled === 1)
   if (targets.length === 0) { ElMessage.warning('没有可操作的启用账号'); return }
-  Object.assign(batchTaskForm, { doctor_codes: [], lock_plan_date: defaultLockDate(), proxy_template_ids: [] })
+  Object.assign(batchTaskForm, { doctor_codes: [], lock_plan_date: defaultLockDate(), proxy_template_ids: [], proxy_max_count: defaultProxyMaxCount.value })
   doctorQuery.value = ''
   batchTaskDialog.value = true
+  loadPoolStats()
 }
 
 function pickPatientForDoctor(accountId, doctorCode) {
@@ -2641,6 +2683,7 @@ async function doRunBatchCreateTasks() {
         patient_id:            item.patientId,
         proxy_template_ids:    tmplIds,
         proxy_template_offset: globalOffset,
+        proxy_max_count:       batchTaskForm.proxy_max_count,
       })
       const assigned = res?.data?.assigned_count ?? 0
       item.status = 'done'
@@ -3626,6 +3669,11 @@ onMounted(loadAll)
 .task-doctor   { font-family: monospace; font-weight: 600; font-size: 14px; color: #303133; white-space: nowrap; }
 .task-date     { color: #909399; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
 .task-patient  { color: #606266; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+.task-tmpl     { color: #409eff; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pool-stat     { color: #606266; }
+.pool-total    { color: #409eff; }
+.pool-assigned { color: #e6a23c; }
+.pool-free     { color: #67c23a; }
 .task-item-right { flex-shrink: 0; margin-left: 12px; display: flex; align-items: center; gap: 8px; }
 .task-proxy-ctrl { display: inline-flex; align-items: center; gap: 4px; }
 .task-proxy-toggle { color: #606266; }
