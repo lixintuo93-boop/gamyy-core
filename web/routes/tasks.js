@@ -11,17 +11,7 @@ router.get('/', (req, res) => {
     const db = getDb();
     let sql = `SELECT t.*,
       a.mobile AS account_mobile,
-      (SELECT CASE
-         WHEN tc <= 1 OR pc < tc THEN pc
-         WHEN task_rank < (pc % tc) THEN (pc / tc) + 1
-         ELSE (pc / tc)
-       END
-       FROM (SELECT
-         (SELECT COUNT(*) FROM proxies p  WHERE p.account_id  = t.account_id AND p.enabled = 1) AS pc,
-         (SELECT COUNT(*) FROM tasks   t2 WHERE t2.account_id = t.account_id AND t2.enabled = 1) AS tc,
-         (SELECT COUNT(*) FROM tasks   t3 WHERE t3.account_id = t.account_id AND t3.enabled = 1 AND t3.id < t.id) AS task_rank
-       )
-      ) AS proxy_count
+      (SELECT COUNT(*) FROM task_proxies tp WHERE tp.task_id = t.id) AS proxy_count
       FROM tasks t
       LEFT JOIN accounts a ON a.id = t.account_id`;
     const params = [];
@@ -45,15 +35,16 @@ router.get('/', (req, res) => {
 // POST /api/tasks  仅需 account_id + doctor_code + lock_plan_date + patient_id
 //
 // 可选：
+//   proxy_max_count          本任务想要的代理数；缺省取系统 default_proxy_max_count
 //   proxy_template_ids       数组，N 个代理模板，按 round-robin 给该任务下的代理逐个应用
 //   proxy_template_id        单值兼容：等价于 proxy_template_ids = [single]
 //   proxy_template_offset    全局轮询偏移量；按 (offset+i) % len 分配
 //
-// 行为：
-//   1. 建 task 行
-//   2. 取该账号下"未在任何 task_proxies 里"的可用代理（enabled=1, account_id=本账号），
-//      按 id ASC 写入 task_proxies（快照）
-//   3. 按 round-robin 给这些代理 apply 模板（写代理覆盖列）
+// 行为（方案 C：代理归属任务，全局空闲池）：
+//   1. 建 task 行（写入 proxy_max_count）
+//   2. 从全局空闲池（任务启用 enabled=1、未在任何 task_proxies）按 id ASC 取 N 个，
+//      写入 task_proxies（快照）
+//   3. 指定模板 → round-robin apply；否则重置覆盖列为系统默认（防止复用代理串味）
 //
 // 返回：
 //   ...task,
@@ -70,6 +61,11 @@ router.post('/', (req, res) => {
     if (templateIds.length === 0 && b.proxy_template_id) templateIds = [b.proxy_template_id];
     const offset = Number.isInteger(b.proxy_template_offset) ? b.proxy_template_offset : 0;
 
+    const sysRow = db.prepare('SELECT default_proxy_max_count FROM system_config WHERE id = 1').get();
+    const defaultCount = sysRow?.default_proxy_max_count ?? 10;
+    const desiredCount = Number.isInteger(b.proxy_max_count) && b.proxy_max_count > 0
+      ? b.proxy_max_count : defaultCount;
+
     const autoName = b.name || `task_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
 
     let assignedCount = 0;
@@ -77,39 +73,30 @@ router.post('/', (req, res) => {
 
     db.transaction(() => {
       const result = db.prepare(`INSERT INTO tasks
-        (name, enabled, account_id, doctor_code, lock_plan_date, patient_id)
-        VALUES (@name, @enabled, @account_id, @doctor_code, @lock_plan_date, @patient_id)`).run({
-        name:           autoName,
-        enabled:        b.enabled !== false ? 1 : 0,
-        account_id:     b.account_id ?? null,
-        doctor_code:    b.doctor_code ?? null,
-        lock_plan_date: b.lock_plan_date ?? null,
-        patient_id:     b.patient_id ?? null,
+        (name, enabled, account_id, doctor_code, lock_plan_date, patient_id, proxy_max_count)
+        VALUES (@name, @enabled, @account_id, @doctor_code, @lock_plan_date, @patient_id, @proxy_max_count)`).run({
+        name:            autoName,
+        enabled:         b.enabled !== false ? 1 : 0,
+        account_id:      b.account_id ?? null,
+        doctor_code:     b.doctor_code ?? null,
+        lock_plan_date:  b.lock_plan_date ?? null,
+        patient_id:      b.patient_id ?? null,
+        proxy_max_count: desiredCount,
       });
       lastInsertRowid = result.lastInsertRowid;
 
-      // 取账号下未被任何任务占用的代理（方案 a：only free proxies）
-      const freeProxies = db.prepare(`
-        SELECT p.id FROM proxies p
-        WHERE p.account_id = ? AND p.enabled = 1
-          AND p.id NOT IN (
-            SELECT tp.proxy_id FROM task_proxies tp
-            JOIN tasks t ON t.id = tp.task_id
-            WHERE t.account_id = ?
-          )
-        ORDER BY p.id ASC
-      `).all(b.account_id, b.account_id);
+      // 从全局空闲池取代理
+      const ids = grabFreeProxies(db, desiredCount);
 
       // 写 task_proxies 快照
       const insertTP = db.prepare('INSERT OR IGNORE INTO task_proxies (task_id, proxy_id) VALUES (?, ?)');
-      for (const p of freeProxies) {
-        insertTP.run(lastInsertRowid, p.id);
-      }
-      assignedCount = freeProxies.length;
+      for (const id of ids) insertTP.run(lastInsertRowid, id);
+      assignedCount = ids.length;
 
-      // 按 round-robin 给这些代理 apply 模板
-      if (templateIds.length > 0 && freeProxies.length > 0) {
-        applyTemplatesRoundRobin(db, freeProxies.map(p => p.id), templateIds, offset);
+      // 指定模板 → 应用；否则重置覆盖列（防止复用代理残留上一任务配置）
+      if (ids.length > 0) {
+        if (templateIds.length > 0) applyTemplatesRoundRobin(db, ids, templateIds, offset);
+        else resetProxyOverrides(db, ids);
       }
     })();
 
@@ -206,6 +193,124 @@ router.patch('/:id/enabled', (req, res) => {
     err(res, e.message, 500);
   }
 });
+
+// POST /api/tasks/:id/assign-proxies   body: { count, proxy_template_ids?, proxy_template_offset? }
+// 把任务的代理数调整到 count：不足则从全局空闲池补，多余则释放（回到全局池）。
+router.post('/:id/assign-proxies', (req, res) => {
+  try {
+    const db = getDb();
+    const taskId = Number(req.params.id);
+    const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+    if (!task) return err(res, '任务不存在', 404);
+    if (isTaskRunning(req, taskId)) return err(res, '任务运行中，请先停止后再调整代理', 400);
+
+    const target = Number.isInteger(req.body.count) && req.body.count >= 0 ? req.body.count : null;
+    if (target == null) return err(res, 'count 不合法', 400);
+    let templateIds = Array.isArray(req.body.proxy_template_ids) ? req.body.proxy_template_ids.filter(Boolean) : [];
+    const offset = Number.isInteger(req.body.proxy_template_offset) ? req.body.proxy_template_offset : 0;
+
+    let assigned = 0, released = 0;
+    db.transaction(() => {
+      db.prepare('UPDATE tasks SET proxy_max_count = ?, updated_at = ? WHERE id = ?').run(target, now(), taskId);
+      const current = db.prepare('SELECT proxy_id FROM task_proxies WHERE task_id = ? ORDER BY proxy_id ASC')
+        .all(taskId).map(r => r.proxy_id);
+
+      if (target > current.length) {
+        const ids = grabFreeProxies(db, target - current.length);
+        const insertTP = db.prepare('INSERT OR IGNORE INTO task_proxies (task_id, proxy_id) VALUES (?, ?)');
+        for (const id of ids) insertTP.run(taskId, id);
+        if (ids.length > 0) {
+          if (templateIds.length > 0) applyTemplatesRoundRobin(db, ids, templateIds, offset);
+          else resetProxyOverrides(db, ids);
+        }
+        assigned = ids.length;
+      } else if (target < current.length) {
+        const toRelease = current.slice(target); // 保留前 target 个，释放其余
+        const del = db.prepare('DELETE FROM task_proxies WHERE task_id = ? AND proxy_id = ?');
+        for (const id of toRelease) del.run(taskId, id);
+        released = toRelease.length;
+      }
+    })();
+
+    const count = db.prepare('SELECT COUNT(*) AS n FROM task_proxies WHERE task_id = ?').get(taskId).n;
+    ok(res, { assigned, released, count });
+  } catch (e) {
+    err(res, e.message, 500);
+  }
+});
+
+// POST /api/tasks/:id/release-proxies   释放该任务全部代理回到全局空闲池
+router.post('/:id/release-proxies', (req, res) => {
+  try {
+    const db = getDb();
+    const taskId = Number(req.params.id);
+    if (!db.prepare('SELECT id FROM tasks WHERE id = ?').get(taskId)) return err(res, '任务不存在', 404);
+    if (isTaskRunning(req, taskId)) return err(res, '任务运行中，请先停止后再释放代理', 400);
+    const r = db.prepare('DELETE FROM task_proxies WHERE task_id = ?').run(taskId);
+    ok(res, { released: r.changes });
+  } catch (e) {
+    err(res, e.message, 500);
+  }
+});
+
+// 工具：任务是否运行中（running / initializing）
+function isTaskRunning(req, taskId) {
+  try {
+    const s = req.taskRunner?.getStatus(Number(taskId))?.status;
+    return s === 'running' || s === 'initializing';
+  } catch { return false; }
+}
+
+// 工具：从全局空闲池取 count 个代理 id（任务启用 enabled=1、未被任何任务占用）
+// 注：是否参与任务只看 enabled(任务启用) + 占用情况，与 ops_enabled(操作启用) 互不影响，
+// 因此「本机直连」等同时开了操作的代理也能被分配给任务。想只做操作不参与任务则将其「任务禁用」。
+function grabFreeProxies(db, count) {
+  if (!count || count <= 0) return [];
+  return db.prepare(`
+    SELECT id FROM proxies
+    WHERE enabled = 1
+      AND id NOT IN (SELECT proxy_id FROM task_proxies)
+    ORDER BY id ASC
+    LIMIT ?
+  `).all(count).map(r => r.id);
+}
+
+// 工具：把一组代理的覆盖列重置为系统默认（NULL / 空），使其 effective 配置回落到模板/系统层。
+// 用于代理被新任务抓取且未指定模板时，避免残留上一任务的配置。
+function resetProxyOverrides(db, proxyIds) {
+  if (!proxyIds || !proxyIds.length) return;
+  const stmt = db.prepare(`UPDATE proxies SET
+    template_id = NULL,
+    check_mode = NULL,
+    check_start_time = NULL,
+    check_window_time = NULL,
+    check_min_interval = NULL,
+    check_distribution = NULL,
+    check_stop_after_found_count = NULL,
+    check_greedy_spread_window = NULL,
+    check_reuse_channel = NULL,
+    lock_config = NULL,
+    channel_build_overrides = '{}',
+    doctor_source = NULL,
+    doctor_select_mode = NULL,
+    doctor_codes = NULL,
+    doctor_plan_date_start = NULL,
+    dept_code = NULL,
+    dept_plan_date_start = NULL,
+    dept_plan_date_end = NULL,
+    target_hosts = NULL,
+    keepalive_enabled = NULL,
+    keepalive_interval_min = NULL,
+    keepalive_interval_max = NULL,
+    keepalive_request_type = NULL,
+    keepalive_business_endpoints = NULL,
+    direct_keepalive_enabled = NULL,
+    heartbeat_timeout = NULL,
+    updated_at = @updated_at
+    WHERE id = @id`);
+  const updatedAt = now();
+  for (const id of proxyIds) stmt.run({ id, updated_at: updatedAt });
+}
 
 // 工具：按 round-robin 把多个代理模板应用到一组代理
 //   proxyIds: [proxyId, ...]（按一致顺序排列，从 i=0 开始算）

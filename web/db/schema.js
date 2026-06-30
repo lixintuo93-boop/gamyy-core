@@ -178,6 +178,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   doctor_code     TEXT,
   lock_plan_date  TEXT,
   patient_id      TEXT,
+  -- 任务级代理数（方案 C：代理归属任务而非账号）；NULL = 取系统 default_proxy_max_count
+  proxy_max_count INTEGER,
   created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );

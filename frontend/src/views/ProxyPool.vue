@@ -12,7 +12,6 @@
                 <template v-if="proxySelected.length > 0">
                   <el-button :loading="batchTesting" @click="startBatchTestJob">批量测试</el-button>
                   <el-button :loading="batchAfdRunning" @click="startBatchAfdJob">批量AFD</el-button>
-                  <el-button type="primary" plain @click="openAssignDialog">分配账号</el-button>
                   <el-button @click="proxyBatchOp('enable')">任务启用</el-button>
                   <el-button @click="proxyBatchOp('disable')">任务禁用</el-button>
                   <el-button @click="proxyBatchOp('ops_enable')">操作启用</el-button>
@@ -23,7 +22,6 @@
               <div class="toolbar-right">
                 <el-button :loading="directAdding" @click="doAddDirect">本机直连</el-button>
                 <el-button :icon="Upload" @click="batchImportDialog = true">批量导入</el-button>
-                <el-button :icon="MagicStick" :loading="autoAssigning" @click="doAutoAssignAll">自动分配</el-button>
                 <el-divider direction="vertical" />
                 <span>总计 <b>{{ proxyStats.total || 0 }}</b></span>
                 <el-divider direction="vertical" />
@@ -85,10 +83,13 @@
               </el-table-column>
               <el-table-column label="运营商" prop="ip_isp"      width="90"  show-overflow-tooltip />
               <el-table-column label="归属地" prop="ip_location" min-width="130" show-overflow-tooltip />
-              <el-table-column label="已分配账号" min-width="130">
+              <el-table-column label="占用任务" min-width="160" show-overflow-tooltip>
                 <template #default="{ row }">
-                  <span v-if="row.account_mobile" class="mono" style="color:#409eff">{{ row.account_mobile }}</span>
-                  <span v-else style="color:#c0c4cc">—</span>
+                  <template v-if="row.occupied_task_id">
+                    <span class="mono" style="color:#409eff">{{ row.account_mobile || '（无账号）' }}</span>
+                    <span style="color:#909399;font-size:12px;margin-left:6px">{{ row.occupied_task_doctor || '?' }} {{ row.occupied_task_date || '' }}</span>
+                  </template>
+                  <span v-else style="color:#c0c4cc">空闲</span>
                 </template>
               </el-table-column>
               <el-table-column label="风控" width="58" align="center">
@@ -126,7 +127,6 @@
                   <el-button :loading="sshBatchTesting" @click="startSshBatchTestJob">批量测试</el-button>
                   <el-button :loading="sshBatchAfdRunning" @click="startSshBatchAfdJob">批量AFD</el-button>
                   <el-button :loading="sshAgentChecking" @click="doBatchCheckAgents">批量检测Agent</el-button>
-                  <el-button type="primary" plain @click="openSshAssignDialog">分配账号</el-button>
                   <el-button @click="sshBatchOp('enable')">任务启用</el-button>
                   <el-button @click="sshBatchOp('disable')">任务禁用</el-button>
                   <el-button @click="sshBatchOp('ops_enable')">操作启用</el-button>
@@ -142,7 +142,6 @@
                 <el-divider direction="vertical" />
                 <el-button :icon="Connection" @click="sshSyncDialog = true">同步DB</el-button>
                 <el-button :icon="Upload" @click="sshBatchImportDialog = true">批量导入</el-button>
-                <el-button :icon="MagicStick" :loading="sshAutoAssigning" @click="doSshAutoAssignAll">自动分配</el-button>
                 <el-divider direction="vertical" />
                 <span>总计 <b>{{ sshStats.total || 0 }}</b></span>
                 <el-divider direction="vertical" />
@@ -220,10 +219,13 @@
               </el-table-column>
               <el-table-column label="运营商" prop="ip_isp"      width="90"  show-overflow-tooltip />
               <el-table-column label="归属地" prop="ip_location" min-width="130" show-overflow-tooltip />
-              <el-table-column label="已分配账号" min-width="130">
+              <el-table-column label="占用任务" min-width="160" show-overflow-tooltip>
                 <template #default="{ row }">
-                  <span v-if="row.account_mobile" class="mono" style="color:#409eff">{{ row.account_mobile }}</span>
-                  <span v-else style="color:#c0c4cc">—</span>
+                  <template v-if="row.occupied_task_id">
+                    <span class="mono" style="color:#409eff">{{ row.account_mobile || '（无账号）' }}</span>
+                    <span style="color:#909399;font-size:12px;margin-left:6px">{{ row.occupied_task_doctor || '?' }} {{ row.occupied_task_date || '' }}</span>
+                  </template>
+                  <span v-else style="color:#c0c4cc">空闲</span>
                 </template>
               </el-table-column>
               <el-table-column label="云端Agent" min-width="160" show-overflow-tooltip>
@@ -299,19 +301,6 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="assignDialog" title="分配账号" width="360px">
-      <p style="color:#909399;font-size:12px;margin:0 0 12px">
-        将选中的 <b>{{ proxySelected.length }}</b> 条代理分配给指定账号
-      </p>
-      <el-select v-model="assignAccountId" placeholder="选择目标账号" style="width:100%" filterable>
-        <el-option v-for="a in enabledAccounts" :key="a.id" :label="`${a.mobile}（上限 ${a.proxy_max_count} 条）`" :value="a.id" />
-      </el-select>
-      <template #footer>
-        <el-button @click="assignDialog = false">取消</el-button>
-        <el-button type="primary" :loading="assignSaving" @click="doAssign">确认分配</el-button>
-      </template>
-    </el-dialog>
-
     <!-- ══════════════ SSH隧道代理 对话框 ══════════════ -->
 
     <el-dialog v-model="sshSyncDialog" title="从 cloud_proxy_pool 同步" width="540px">
@@ -346,19 +335,6 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="sshAssignDialog" title="分配账号" width="360px">
-      <p style="color:#909399;font-size:12px;margin:0 0 12px">
-        将选中的 <b>{{ sshSelected.length }}</b> 条 SSH 代理分配给指定账号
-      </p>
-      <el-select v-model="sshAssignAccountId" placeholder="选择目标账号" style="width:100%" filterable>
-        <el-option v-for="a in enabledAccounts" :key="a.id" :label="`${a.mobile}（上限 ${a.proxy_max_count} 条）`" :value="a.id" />
-      </el-select>
-      <template #footer>
-        <el-button @click="sshAssignDialog = false">取消</el-button>
-        <el-button type="primary" :loading="sshAssignSaving" @click="doSshAssign">确认分配</el-button>
-      </template>
-    </el-dialog>
-
     <!-- ══════════════ SSH 代理编辑对话框 ══════════════ -->
 
     <el-dialog v-model="sshEditDialog" title="编辑 SSH 代理" width="500px">
@@ -389,7 +365,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
-import { Upload, MagicStick, Connection } from '@element-plus/icons-vue'
+import { Upload, Connection } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import MainLayout from '@/layout/MainLayout.vue'
 import {
@@ -397,7 +373,7 @@ import {
   updateProxyEntry, deleteProxyEntry,
   batchImportProxies, batchOpsProxy,
   startBatchTest, startBatchAfd, getProxyJob,
-  batchAssign, getAccounts, autoAssignAll, addDirectProxy,
+  addDirectProxy,
   setProxyCloudAgent, checkProxyCloudAgent, batchCheckCloudAgents,
   autoFillAgentUrls,
 } from '@/api'
@@ -407,12 +383,6 @@ import { isDatetime } from '@/utils/validate'
 // 共用
 // ─────────────────────────────────────────────────────────
 const activeTab       = ref('proxy')
-const enabledAccounts = ref([])
-
-async function loadEnabledAccounts() {
-  const res = await getAccounts({ enabled: '1' })
-  enabledAccounts.value = res.data || []
-}
 
 function onTabClick(tab) {
   if (tab.paneName === 'ssh' && sshRows.value.length === 0) loadSshAll()
@@ -448,10 +418,6 @@ const importText       = ref('')
 const importGroup      = ref('')
 const importPlatform   = ref('')
 const importSaving     = ref(false)
-const assignDialog     = ref(false)
-const assignAccountId  = ref(null)
-const assignSaving     = ref(false)
-const autoAssigning    = ref(false)
 const directAdding     = ref(false)
 
 async function loadProxyData() {
@@ -462,7 +428,7 @@ async function loadProxyData() {
   } finally { proxyLoading.value = false }
 }
 async function loadProxyStats()    { const r = await getProxyPoolStats(); Object.assign(proxyStats, r.data) }
-function loadProxyAll() { loadProxyData(); loadProxyStats(); loadEnabledAccounts() }
+function loadProxyAll() { loadProxyData(); loadProxyStats() }
 
 function openEditProxy(row) {
   editProxyRow.value = row
@@ -513,28 +479,6 @@ async function proxyBatchOp(action) {
   await batchOpsProxy({ action, ids })
   ElMessage.success(`操作完成（${ids.length} 条）`)
   loadProxyAll()
-}
-function openAssignDialog() { assignAccountId.value = null; assignDialog.value = true }
-async function doAssign() {
-  if (!assignAccountId.value) return ElMessage.warning('请选择目标账号')
-  assignSaving.value = true
-  try {
-    const ids = proxySelected.value.map(r => r.id)
-    await batchAssign(ids, assignAccountId.value)
-    ElMessage.success(`已将 ${ids.length} 条代理分配给该账号`)
-    assignDialog.value = false
-    loadProxyAll()
-  } finally { assignSaving.value = false }
-}
-async function doAutoAssignAll() {
-  autoAssigning.value = true
-  try {
-    const res = await autoAssignAll()
-    const d = res.data
-    if (d.totalAssigned === 0) ElMessage.info(`所有账号代理已满（处理了 ${d.accountsProcessed} 个账号）`)
-    else ElMessage.success(`自动分配完成：为 ${d.details.length} 个账号补充了 ${d.totalAssigned} 条代理`)
-    loadProxyAll()
-  } finally { autoAssigning.value = false }
 }
 async function startBatchTestJob() {
   const ids = proxySelected.value.map(r => r.id)
@@ -598,10 +542,6 @@ const sshBatchImportText     = ref('')
 const sshBatchImportGroup    = ref('')
 const sshBatchImportPlatform = ref('')
 const sshBatchImporting      = ref(false)
-const sshAssignDialog    = ref(false)
-const sshAssignAccountId = ref(null)
-const sshAssignSaving    = ref(false)
-const sshAutoAssigning   = ref(false)
 
 const filteredSshRows = computed(() => {
   if (sshFilterRisk.value === '') return sshRows.value
@@ -618,7 +558,7 @@ async function loadSshData() {
   } finally { sshLoading.value = false }
 }
 async function loadSshStats() { const r = await getSshProxyStats(); Object.assign(sshStats, r.data) }
-function loadSshAll() { loadSshData(); loadSshStats(); loadEnabledAccounts() }
+function loadSshAll() { loadSshData(); loadSshStats() }
 
 async function doSshSync() {
   if (!sshSyncPath.value.trim()) return ElMessage.warning('请输入 DB 路径')
@@ -665,28 +605,6 @@ async function sshBatchOp(action) {
   await batchOpsProxy({ action, ids })
   ElMessage.success(`操作完成（${ids.length} 条）`)
   loadSshAll()
-}
-function openSshAssignDialog() { sshAssignAccountId.value = null; sshAssignDialog.value = true }
-async function doSshAssign() {
-  if (!sshAssignAccountId.value) return ElMessage.warning('请选择目标账号')
-  sshAssignSaving.value = true
-  try {
-    const ids = sshSelected.value.map(r => r.id)
-    await batchAssign(ids, sshAssignAccountId.value)
-    ElMessage.success(`已将 ${ids.length} 条 SSH 代理分配给该账号`)
-    sshAssignDialog.value = false
-    loadSshAll()
-  } finally { sshAssignSaving.value = false }
-}
-async function doSshAutoAssignAll() {
-  sshAutoAssigning.value = true
-  try {
-    const res = await autoAssignAll()
-    const d = res.data
-    if (d.totalAssigned === 0) ElMessage.info(`所有账号代理已满（处理了 ${d.accountsProcessed} 个账号）`)
-    else ElMessage.success(`自动分配完成：为 ${d.details.length} 个账号补充了 ${d.totalAssigned} 条代理`)
-    loadSshAll()
-  } finally { sshAutoAssigning.value = false }
 }
 async function doDeleteSsh(row) {
   const label = row.port ? `127.0.0.1:${row.port}（云服务器 ${row.real_ip}）` : `云服务器 ${row.real_ip}（仅云端）`

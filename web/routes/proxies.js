@@ -8,26 +8,6 @@ const { ALL_IDS: HEARTBEAT_ALL_IDS } = require('../../services/HeartbeatEndpoint
 
 const router = Router();
 
-// 把这些代理从所有 task_proxies 快照里移除
-// 调用时机：代理被 unassign / 重新 assign（account_id 改变）时
-function cleanupTaskProxies(db, proxyIds) {
-  if (!proxyIds || proxyIds.length === 0) return;
-  const placeholders = proxyIds.map(() => '?').join(',');
-  db.prepare(`DELETE FROM task_proxies WHERE proxy_id IN (${placeholders})`).run(...proxyIds);
-}
-
-function getRunningAccountIds(db, taskRunner) {
-  const statuses = taskRunner.getAllStatuses();
-  const runningIds = Object.entries(statuses)
-    .filter(([, s]) => s.status === 'running' || s.status === 'initializing')
-    .map(([id]) => Number(id));
-  if (runningIds.length === 0) return new Set();
-  const rows = db.prepare(
-    `SELECT DISTINCT account_id FROM tasks WHERE id IN (${runningIds.map(() => '?').join(',')}) AND account_id IS NOT NULL`
-  ).all(...runningIds);
-  return new Set(rows.map(r => r.account_id));
-}
-
 function parse(row) {
   return {
     ...row,
@@ -337,50 +317,6 @@ router.put('/:id/config', (req, res) => {
   } catch (e) { err(res, e.message, 500); }
 });
 
-// POST /api/proxies/batch/assign
-router.post('/batch/assign', (req, res) => {
-  try {
-    const { ids, accountId } = req.body;
-    if (!Array.isArray(ids) || !accountId) return err(res, 'ids and accountId are required');
-    const db = getDb();
-    if (!db.prepare('SELECT id FROM accounts WHERE id = ?').get(accountId)) return err(res, '账号不存在', 404);
-    const runningAccs = getRunningAccountIds(db, req.taskRunner);
-    if (runningAccs.has(Number(accountId))) return err(res, '该账号有任务正在运行，请先停止后再调整代理分配', 400);
-    const update = db.transaction((idList) => {
-      for (const id of idList) db.prepare('UPDATE proxies SET account_id = ?, updated_at = ? WHERE id = ?').run(accountId, now(), id);
-      cleanupTaskProxies(db, idList);
-    });
-    update(ids);
-    req.broadcast('proxy-assignment-changed', { accountIds: [accountId] });
-    ok(res, { assigned: ids.length, accountId });
-  } catch (e) { err(res, e.message, 500); }
-});
-
-// POST /api/proxies/batch/unassign
-router.post('/batch/unassign', (req, res) => {
-  try {
-    const { ids } = req.body;
-    if (!Array.isArray(ids)) return err(res, 'ids array is required');
-    const db = getDb();
-    const affectedAccounts = db.prepare(
-      `SELECT DISTINCT account_id FROM proxies WHERE id IN (${ids.map(() => '?').join(',')}) AND account_id IS NOT NULL`
-    ).all(...ids).map(r => r.account_id);
-    const runningAccs = getRunningAccountIds(db, req.taskRunner);
-    const blocked = affectedAccounts.filter(id => runningAccs.has(id));
-    if (blocked.length) {
-      const mobiles = db.prepare(`SELECT mobile FROM accounts WHERE id IN (${blocked.map(() => '?').join(',')})`).all(...blocked).map(r => r.mobile);
-      return err(res, `以下账号有任务正在运行，请先停止后再取消分配：${mobiles.join('、')}`, 400);
-    }
-    const update = db.transaction((idList) => {
-      for (const id of idList) db.prepare('UPDATE proxies SET account_id = NULL, updated_at = ? WHERE id = ?').run(now(), id);
-      cleanupTaskProxies(db, idList);
-    });
-    update(ids);
-    if (affectedAccounts.length) req.broadcast('proxy-assignment-changed', { accountIds: affectedAccounts });
-    ok(res, { unassigned: ids.length });
-  } catch (e) { err(res, e.message, 500); }
-});
-
 // PATCH /api/proxies/batch/enabled
 router.patch('/batch/enabled', (req, res) => {
   try {
@@ -393,43 +329,6 @@ router.patch('/batch/enabled', (req, res) => {
     });
     update(ids);
     ok(res, { updated: ids.length, enabled: !!val });
-  } catch (e) { err(res, e.message, 500); }
-});
-
-// POST /api/proxies/:id/assign
-router.post('/:id/assign', (req, res) => {
-  try {
-    const db = getDb();
-    if (!db.prepare('SELECT id FROM proxies WHERE id = ?').get(req.params.id)) return err(res, '代理不存在', 404);
-    if (!db.prepare('SELECT id FROM accounts WHERE id = ?').get(req.body.accountId)) return err(res, '账号不存在', 404);
-    const runningAccs = getRunningAccountIds(db, req.taskRunner);
-    if (runningAccs.has(Number(req.body.accountId))) return err(res, '该账号有任务正在运行，请先停止后再调整代理分配', 400);
-    db.transaction(() => {
-      db.prepare('UPDATE proxies SET account_id = ?, updated_at = ? WHERE id = ?').run(req.body.accountId, now(), req.params.id);
-      cleanupTaskProxies(db, [Number(req.params.id)]);
-    })();
-    req.broadcast('proxy-assignment-changed', { accountIds: [req.body.accountId] });
-    ok(res, { assigned: true, accountId: req.body.accountId });
-  } catch (e) { err(res, e.message, 500); }
-});
-
-// POST /api/proxies/:id/unassign
-router.post('/:id/unassign', (req, res) => {
-  try {
-    const db = getDb();
-    const existing = db.prepare('SELECT account_id FROM proxies WHERE id = ?').get(req.params.id);
-    if (!existing) return err(res, '代理不存在', 404);
-    const prevAccountId = existing.account_id;
-    if (prevAccountId) {
-      const runningAccs = getRunningAccountIds(db, req.taskRunner);
-      if (runningAccs.has(prevAccountId)) return err(res, '该账号有任务正在运行，请先停止后再取消代理分配', 400);
-    }
-    db.transaction(() => {
-      db.prepare('UPDATE proxies SET account_id = NULL, updated_at = ? WHERE id = ?').run(now(), req.params.id);
-      cleanupTaskProxies(db, [Number(req.params.id)]);
-    })();
-    if (prevAccountId) req.broadcast('proxy-assignment-changed', { accountIds: [prevAccountId] });
-    ok(res, { unassigned: true });
   } catch (e) { err(res, e.message, 500); }
 });
 
@@ -447,90 +346,9 @@ router.delete('/:id', (req, res) => {
   } catch (e) { err(res, e.message, 500); }
 });
 
-// POST /api/proxies/auto-assign-all
-router.post('/auto-assign-all', (req, res) => {
-  try {
-    const db = getDb();
-    const accounts = db.prepare('SELECT * FROM accounts WHERE enabled = 1').all();
-    const runningAccs = getRunningAccountIds(db, req.taskRunner);
-    const skipped = [];
-    const eligibleAccounts = accounts.filter(account => {
-      if (runningAccs.has(account.id)) { skipped.push(account.mobile); return false; }
-      return true;
-    });
-    const { totalAssigned, details } = autoAssignRoundRobin(db, eligibleAccounts, false);
-    const changedIds = details.map(d => d.accountId);
-    if (changedIds.length) req.broadcast('proxy-assignment-changed', { accountIds: changedIds });
-    ok(res, { accountsProcessed: eligibleAccounts.length, totalAssigned, details, skipped });
-  } catch (e) { err(res, e.message, 500); }
-});
-
-// POST /api/proxies/:accountId/auto-assign
-router.post('/:accountId/auto-assign', (req, res) => {
-  try {
-    const db = getDb();
-    const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.accountId);
-    if (!account) return err(res, '账号不存在', 404);
-    const runningAccs = getRunningAccountIds(db, req.taskRunner);
-    if (runningAccs.has(account.id)) return err(res, '该账号有任务正在运行，请先停止后再分配代理', 400);
-    const count = autoAssign(db, account, false);
-    if (count > 0) req.broadcast('proxy-assignment-changed', { accountIds: [account.id] });
-    ok(res, { assigned: count });
-  } catch (e) { err(res, e.message, 500); }
-});
-
-// GET /api/proxies/:accountId/auto-assign/preview
-router.get('/:accountId/auto-assign/preview', (req, res) => {
-  try {
-    const db = getDb();
-    const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.accountId);
-    if (!account) return err(res, '账号不存在', 404);
-    const count = autoAssign(db, account, true);
-    ok(res, { wouldAssign: count });
-  } catch (e) { err(res, e.message, 500); }
-});
-
-// POST /api/proxies/rebalance
-router.post('/rebalance', (req, res) => {
-  try {
-    const db = getDb();
-    const accounts = db.prepare('SELECT * FROM accounts WHERE enabled = 1').all();
-    const accountIds = accounts.map(a => a.id);
-    const runningAccs = getRunningAccountIds(db, req.taskRunner);
-    const blockedIds = accountIds.filter(id => runningAccs.has(id));
-    if (blockedIds.length) {
-      const mobiles = db.prepare(`SELECT mobile FROM accounts WHERE id IN (${blockedIds.map(() => '?').join(',')})`).all(...blockedIds).map(r => r.mobile);
-      return err(res, `以下账号有任务正在运行，无法重新均衡代理：${mobiles.join('、')}`, 400);
-    }
-    if (accountIds.length > 0) {
-      // 找到将被解绑的代理，先解绑再清理 task_proxies
-      const affectedProxyIds = db.prepare(
-        `SELECT id FROM proxies WHERE account_id IN (${accountIds.map(() => '?').join(',')})`
-      ).all(...accountIds).map(r => r.id);
-      db.prepare(`UPDATE proxies SET account_id = NULL WHERE account_id IN (${accountIds.map(() => '?').join(',')})`).run(...accountIds);
-      cleanupTaskProxies(db, affectedProxyIds);
-    }
-    const { totalAssigned } = autoAssignRoundRobin(db, accounts, false);
-    if (accountIds.length) req.broadcast('proxy-assignment-changed', { accountIds });
-    ok(res, { accountsRebalanced: accounts.length, totalAssigned });
-  } catch (e) { err(res, e.message, 500); }
-});
-
-// GET /api/proxies/rebalance/preview
-router.get('/rebalance/preview', (_req, res) => {
-  try {
-    const db = getDb();
-    const accounts = db.prepare('SELECT * FROM accounts WHERE enabled = 1').all();
-    const { details } = autoAssignRoundRobin(db, accounts, true);
-    const detailMap = new Map(details.map(d => [d.accountId, d.assigned]));
-    const preview = accounts.map(account => ({
-      accountId: account.id,
-      accountMobile: account.mobile,
-      wouldAssign: detailMap.get(account.id) || 0,
-    }));
-    ok(res, preview);
-  } catch (e) { err(res, e.message, 500); }
-});
+// 注：账号级任务代理分配端点（auto-assign-all / :accountId/auto-assign / rebalance /
+// batch/assign / batch/unassign / :id/assign / :id/unassign）已随方案 C 移除——
+// 代理改为任务级归属，分配在 POST /api/tasks/:id/assign-proxies 完成。
 
 // POST /api/proxies/auto-assign-ops-all
 router.post('/auto-assign-ops-all', (req, res) => {
@@ -553,80 +371,6 @@ router.post('/auto-assign-ops-all', (req, res) => {
 
 // ---- helpers ----
 
-function autoAssign(db, account, dryRun) {
-  const sys = db.prepare('SELECT default_proxy_max_count FROM system_config WHERE id = 1').get();
-  const maxCount = account.proxy_max_count || sys?.default_proxy_max_count || 10;
-  const already = db.prepare('SELECT COUNT(*) AS n FROM proxies WHERE account_id = ? AND enabled = 1').get(account.id).n;
-  const need = Math.max(0, maxCount - already);
-  if (need === 0) return 0;
-  const candidates = db.prepare('SELECT id FROM proxies WHERE account_id IS NULL AND enabled = 1 ORDER BY RANDOM() LIMIT ?').all(need);
-  if (!dryRun && candidates.length > 0) {
-    const assign = db.transaction((list) => {
-      for (const p of list) db.prepare('UPDATE proxies SET account_id = ?, updated_at = ? WHERE id = ?').run(account.id, now(), p.id);
-    });
-    assign(candidates);
-  }
-  return candidates.length;
-}
-
-function autoAssignRoundRobin(db, accounts, dryRun) {
-  const sys = db.prepare('SELECT default_proxy_max_count FROM system_config WHERE id = 1').get();
-  const defaultMax = sys?.default_proxy_max_count || 10;
-
-  const eligible = accounts.map(account => {
-    const maxCount = account.proxy_max_count || defaultMax;
-    const already = db.prepare('SELECT COUNT(*) AS n FROM proxies WHERE account_id = ? AND enabled = 1').get(account.id).n;
-    const need = Math.max(0, maxCount - already);
-    return { id: account.id, mobile: account.mobile, need };
-  }).filter(a => a.need > 0);
-
-  for (let i = eligible.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [eligible[i], eligible[j]] = [eligible[j], eligible[i]];
-  }
-
-  if (eligible.length === 0) return { totalAssigned: 0, details: [] };
-
-  const proxies = db.prepare('SELECT id FROM proxies WHERE account_id IS NULL AND enabled = 1 ORDER BY RANDOM()').all();
-  if (proxies.length === 0) return { totalAssigned: 0, details: [] };
-
-  const assignments = new Map();
-  let proxyIdx = 0;
-  let accountIdx = 0;
-
-  while (proxyIdx < proxies.length && eligible.length > 0) {
-    const account = eligible[accountIdx];
-    if (!assignments.has(account.id)) assignments.set(account.id, []);
-    assignments.get(account.id).push(proxies[proxyIdx].id);
-    proxyIdx++;
-    account.need--;
-    if (account.need === 0) {
-      eligible.splice(accountIdx, 1);
-      if (eligible.length > 0) accountIdx = accountIdx % eligible.length;
-    } else {
-      accountIdx = (accountIdx + 1) % eligible.length;
-    }
-  }
-
-  if (!dryRun && assignments.size > 0) {
-    const stmt = db.prepare('UPDATE proxies SET account_id = ?, updated_at = ? WHERE id = ?');
-    db.transaction(() => {
-      for (const [accountId, proxyIds] of assignments) {
-        for (const proxyId of proxyIds) stmt.run(accountId, now(), proxyId);
-      }
-    })();
-  }
-
-  const accountMobileMap = new Map(accounts.map(a => [a.id, a.mobile]));
-  const details = [];
-  let totalAssigned = 0;
-  for (const [accountId, proxyIds] of assignments) {
-    details.push({ accountId, mobile: accountMobileMap.get(accountId), assigned: proxyIds.length });
-    totalAssigned += proxyIds.length;
-  }
-  return { totalAssigned, details };
-}
-
 function autoAssignOps(db, account) {
   if (account.ops_proxy_id) return 0;
   // 排除仅云端 SSH 代理（无本地端口）：账号操作必须走本地 SOCKS5
@@ -645,7 +389,4 @@ function autoAssignOps(db, account) {
 }
 
 module.exports = router;
-module.exports.autoAssign = autoAssign;
-module.exports.autoAssignRoundRobin = autoAssignRoundRobin;
 module.exports.autoAssignOps = autoAssignOps;
-module.exports.getRunningAccountIds = getRunningAccountIds;

@@ -55,18 +55,9 @@ export const setProxyEnabled     = (id, en)   => http.patch(`/proxies/${id}/enab
 export const applyProxyTemplate  = (id, tId)  => http.patch(`/proxies/${id}/template`, { templateId: tId })
 export const batchApplyProxyTemplate = (accountId, templateId) => http.post('/proxies/batch/apply-template', { accountId, templateId })
 export const updateProxyConfig   = (id, data) => http.put(`/proxies/${id}/config`, data)
-export const assignProxy         = (id, accountId) => http.post(`/proxies/${id}/assign`, { accountId })
-export const unassignProxy       = (id)            => http.post(`/proxies/${id}/unassign`)
 export const deleteProxy         = (id)            => http.delete(`/proxies/${id}`)
-export const batchAssign         = (ids, accountId)=> http.post('/proxies/batch/assign', { ids, accountId })
-export const batchUnassign       = (ids)           => http.post('/proxies/batch/unassign', { ids })
 export const batchSetProxyEnabled= (ids, en)       => http.patch('/proxies/batch/enabled', { ids, enabled: en })
-export const autoAssignProxies   = (accountId)     => http.post(`/proxies/${accountId}/auto-assign`)
-export const previewAutoAssign   = (accountId)     => http.get(`/proxies/${accountId}/auto-assign/preview`)
-export const autoAssignAll       = ()              => http.post('/proxies/auto-assign-all')
 export const autoAssignOpsAll    = ()              => http.post('/proxies/auto-assign-ops-all')
-export const rebalanceProxies    = ()              => http.post('/proxies/rebalance')
-export const previewRebalance    = ()              => http.get('/proxies/rebalance/preview')
 export const setAccountOpsProxy  = (id, proxyId)   => http.patch(`/accounts/${id}/ops-proxy`, { proxyId })
 
 // ── 任务控制 ──────────────────────────────────────────────
@@ -76,6 +67,9 @@ export const getTaskStatus       = (id)   => http.get(`/tasks/${id}/status`)
 export const getRunningTasks     = ()     => http.get('/tasks/running')
 export const getTaskProxies      = (id)   => http.get(`/tasks/${id}/proxies`)
 export const getTaskProxyStats   = (id)   => http.get(`/tasks/${id}/proxy-stats`)
+// 方案 C：任务级代理分配——把任务代理数调整到 count（不足从全局空闲池补，多余释放）
+export const assignTaskProxies   = (id, count) => http.post(`/tasks/${id}/assign-proxies`, { count })
+export const releaseTaskProxies  = (id)        => http.post(`/tasks/${id}/release-proxies`)
 
 // ── 日志 ──────────────────────────────────────────────────
 export const getLogs             = (type, params) => http.get(`/logs/${type}`, { params })

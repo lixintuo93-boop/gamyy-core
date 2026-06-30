@@ -102,11 +102,6 @@
               class="acct-info-pill acct-password-pill"
               title="App 端密码（明文）"
             >🔑 {{ acct.password }}</span>
-            <span
-              v-if="acct.device_uuid"
-              class="acct-info-pill acct-uuid-pill"
-              title="设备 UUID"
-            >📱 {{ acct.device_uuid }}</span>
 
             <el-switch
               :model-value="acct.enabled === 1"
@@ -129,34 +124,15 @@
                   <div>性别：{{ p.gender || '—' }}</div>
                   <div>年龄：{{ p.age != null ? p.age + ' 岁' : '—' }}</div>
                 </template>
-                <span class="patient-icon-wrap">
-                  <span class="patient-emoji">{{ patientIcon(p) }}</span>
+                <span class="patient-chip">
+                  <span class="patient-name">{{ p.name }}</span>
                   <span class="patient-del" @click.stop="quickDeletePatient(acct, p)" title="删除就诊人">×</span>
                 </span>
               </el-tooltip>
               <span class="patient-add" @click.stop="openAddPatient(acct)" title="添加就诊人">+</span>
             </div>
 
-            <!-- 代理配置 -->
-            <span class="proxy-badge" :class="{ 'proxy-badge-dim': acct.enabled === 0 }">
-              任务代理{{ acct.proxy_count }}/{{ acct.proxy_max_count || defaultProxyMaxCount }}
-            </span>
-            <el-input-number
-              :model-value="acct.proxy_max_count || defaultProxyMaxCount"
-              @click.stop
-              @change="(v) => updateProxyMax(acct, v)"
-              :min="1" :controls="false"
-              size="small" style="width:58px;flex-shrink:0"
-              :disabled="accountHasRunningTask(acct.id)"
-              title="任务代理上限"
-            />
-            <el-button
-              size="small" plain style="flex-shrink:0;padding:5px 8px"
-              @click.stop="doAutoAssignProxy(acct)"
-              :disabled="accountHasRunningTask(acct.id)"
-              :title="accountHasRunningTask(acct.id) ? '任务运行中，请先停止后再分配代理' : '自动分配任务代理'"
-            >分配</el-button>
-            <!-- 操作代理 -->
+            <!-- 操作代理（账号级；任务代理已下沉到任务行配置） -->
             <span
               class="ops-proxy-badge"
               :class="{ 'ops-proxy-badge-set': !!acct.ops_proxy_label }"
@@ -237,6 +213,36 @@
                   <TaskStatusBadge :status="runtimeStatus[task.id]?.status" :stop-reason="runtimeStatus[task.id]?.stopReason" :enabled="task.enabled" />
                 </div>
                 <div class="task-item-right">
+                  <!-- 任务代理数量徽章：当前/上限 -->
+                  <span class="proxy-badge" title="已分配任务代理 / 上限">
+                    任务代理{{ task.proxy_count ?? 0 }}/{{ task.proxy_max_count || defaultProxyMaxCount }}
+                  </span>
+                  <!-- 任务级代理：数量 + 分配（运行中禁用） -->
+                  <span class="task-proxy-ctrl">
+                    <el-input-number
+                      v-model="taskProxyCount[task.id]"
+                      :min="0" :controls="false"
+                      size="small" style="width:52px"
+                      :disabled="isRunning(task.id)"
+                      title="任务代理数"
+                      @click.stop
+                    />
+                    <el-button
+                      size="small" plain style="padding:5px 8px"
+                      :disabled="isRunning(task.id)"
+                      :title="isRunning(task.id) ? '任务运行中，请先停止后再分配代理' : '从全局空闲池为该任务分配代理'"
+                      @click.stop="doAssignTaskProxies(acct, task)"
+                    >分配</el-button>
+                  </span>
+                  <!-- 代理明细折叠开关（默认折叠） -->
+                  <el-button
+                    size="small" text class="task-proxy-toggle"
+                    @click.stop="toggleTaskProxies(task.id)"
+                  >
+                    <span class="expand-arrow">{{ expandedTaskProxies.has(task.id) ? '▲' : '▼' }}</span>
+                    <span>代理</span>
+                    <span class="expand-count">{{ (taskProxiesMap[task.id] || []).length || (task.proxy_count ?? 0) }}</span>
+                  </el-button>
                   <el-button-group>
                     <el-button v-if="!isRunning(task.id)" size="small" type="primary" plain @click="handleStart(task)">启动</el-button>
                     <el-button v-else size="small" type="danger" plain @click="handleStop(task)">停止</el-button>
@@ -245,7 +251,7 @@
                   </el-button-group>
                 </div>
               </div>
-              <div v-if="(taskProxiesMap[task.id] || []).length > 0" class="task-proxy-panel">
+              <div v-if="expandedTaskProxies.has(task.id) && (taskProxiesMap[task.id] || []).length > 0" class="task-proxy-panel">
                 <template v-for="p in taskProxiesMap[task.id]" :key="p.id">
                   <div class="proxy-stat-row" :class="{ 'proxy-row-risk': p.is_risk_flagged }">
                     <span class="proxy-ip">{{ formatProxyIp(task.id, p) }}</span>
@@ -1211,7 +1217,7 @@ import TaskConfigDialog from '@/components/TaskConfigDialog.vue'
 import TargetHostsEditor from '@/components/TargetHostsEditor.vue'
 import TimeInput from '@/components/TimeInput.vue'
 import {
-  getAccounts, setAccountEnabled, updateAccount, deleteAccount,
+  getAccounts, setAccountEnabled, deleteAccount,
   getTasks, createTask, deleteTask, startTask, stopTask, getRunningTasks,
   getDoctors, getAccountPatients, getTaskProxies, getTaskProxyStats,
   updateProxyConfig,
@@ -1219,7 +1225,7 @@ import {
   executeAccountOperation, getAccountSourceRecords, getAccountMessages, getAccountRequestLogs,
   generateAccounts, addManualAccount,
   generatePatientInfo,
-  autoAssignProxies, autoAssignOpsAll, setAccountOpsProxy, getProxies,
+  assignTaskProxies, autoAssignOpsAll, setAccountOpsProxy, getProxies,
   createRegisterSession, getRegisterCaptcha, sendRegisterSms, submitRegister, cancelRegisterSession,
 } from '@/api'
 import { useWebSocket } from '@/composables/useWebSocket'
@@ -1241,6 +1247,10 @@ const tasksLoading  = ref(false)
 
 // ── 展开状态 ──
 const expandedIds   = ref(new Set())
+// 任务代理明细折叠（默认折叠：不在集合内）
+const expandedTaskProxies = ref(new Set())
+// 任务级代理数输入（task.id -> count），默认取 task.proxy_max_count || 系统默认
+const taskProxyCount = reactive({})
 
 // ── 任务配置弹窗 ──
 const configDialogVisible = ref(false)
@@ -1908,6 +1918,7 @@ async function loadAll() {
     systemHosts.value = Array.isArray(sys.data?.target_hosts) ? sys.data.target_hosts : []
     heartbeatEndpoints.value = Array.isArray(eps.data) ? eps.data : []
     defaultProxyMaxCount.value = sys.data?.default_proxy_max_count ?? 10
+    seedTaskProxyCount(tasks.data)
     for (const [id, s] of Object.entries(running.data || {})) {
       runtimeStatus[id] = s
     }
@@ -1931,9 +1942,19 @@ async function loadAllPatients() {
   patientsMap.value = map
 }
 
+// 同步任务代理数输入框默认值（已有用户输入则保留）
+function seedTaskProxyCount(tasks) {
+  for (const t of tasks || []) {
+    if (taskProxyCount[t.id] == null) {
+      taskProxyCount[t.id] = t.proxy_max_count ?? defaultProxyMaxCount.value
+    }
+  }
+}
+
 async function reloadTasks() {
   const res = await getTasks()
   allTasks.value = res.data
+  seedTaskProxyCount(res.data)
 }
 
 async function reloadAccounts() {
@@ -1965,17 +1986,6 @@ async function toggleEnabled(acct, v) {
   const idx = accounts.value.findIndex(a => a.id === acct.id)
   if (idx >= 0) accounts.value[idx] = res.data
   if (v && expandedIds.value.has(acct.id)) loadTaskProxiesForAccount(acct.id)
-}
-
-async function updateProxyMax(acct, v) {
-  if (!v || v === acct.proxy_max_count) return
-  if (accountHasRunningTask(acct.id)) {
-    ElMessage.warning('该账号有任务正在运行，请先停止后再调整代理上限')
-    return
-  }
-  await updateAccount(acct.id, { proxy_max_count: v })
-  await Promise.all([reloadAccounts(), reloadTasks()])
-  if (expandedIds.value.has(acct.id)) loadTaskProxiesForAccount(acct.id)
 }
 
 // ── 就诊人操作 ──
@@ -2275,17 +2285,34 @@ async function doAutoAssignOpsAll() {
   }
 }
 
-// ── 任务代理自动分配 ──
-async function doAutoAssignProxy(acct) {
-  if (accountHasRunningTask(acct.id)) {
-    ElMessage.warning('该账号有任务正在运行，请先停止后再分配代理')
+// ── 任务代理明细折叠 ──
+function toggleTaskProxies(taskId) {
+  const s = new Set(expandedTaskProxies.value)
+  if (s.has(taskId)) s.delete(taskId)
+  else s.add(taskId)
+  expandedTaskProxies.value = s
+}
+
+// ── 任务级代理分配（方案 C：从全局空闲池补/释放到 count） ──
+async function doAssignTaskProxies(acct, task) {
+  if (isRunning(task.id)) {
+    ElMessage.warning('任务运行中，请先停止后再分配代理')
+    return
+  }
+  const count = taskProxyCount[task.id]
+  if (count == null || count < 0) {
+    ElMessage.warning('请输入有效的代理数')
     return
   }
   try {
-    await autoAssignProxies(acct.id)
-    await reloadAccounts()
+    const res = await assignTaskProxies(task.id, count)
+    const d = res.data || {}
+    await reloadTasks()
     if (expandedIds.value.has(acct.id)) await loadTaskProxiesForAccount(acct.id)
-    ElMessage.success('代理自动分配完成')
+    const parts = []
+    if (d.assigned) parts.push(`新增 ${d.assigned}`)
+    if (d.released) parts.push(`释放 ${d.released}`)
+    ElMessage.success(`代理分配完成：当前 ${d.count ?? count} 个${parts.length ? '（' + parts.join('，') + '）' : ''}`)
   } catch (e) {
     ElMessage.error(e.message || '分配失败')
   }
@@ -3379,17 +3406,24 @@ onMounted(loadAll)
   gap: 3px;
   flex-shrink: 0;
 }
-.patient-icon-wrap {
+.patient-chip {
   position: relative;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   cursor: default;
-}
-.patient-emoji {
-  font-size: 16px;
+  font-size: 12px;
   line-height: 1;
-  display: block;
+  color: #606266;
+  background: #f0f2f5;
+  border: 1px solid #e4e7ed;
+  border-radius: 10px;
+  padding: 3px 8px;
+}
+.patient-name {
+  max-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .patient-del {
   position: absolute;
@@ -3411,7 +3445,7 @@ onMounted(loadAll)
   z-index: 1;
   user-select: none;
 }
-.patient-icon-wrap:hover .patient-del { opacity: 1; }
+.patient-chip:hover .patient-del { opacity: 1; }
 .patient-add {
   width: 20px;
   height: 20px;
@@ -3592,7 +3626,9 @@ onMounted(loadAll)
 .task-doctor   { font-family: monospace; font-weight: 600; font-size: 14px; color: #303133; white-space: nowrap; }
 .task-date     { color: #909399; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
 .task-patient  { color: #606266; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
-.task-item-right { flex-shrink: 0; margin-left: 12px; }
+.task-item-right { flex-shrink: 0; margin-left: 12px; display: flex; align-items: center; gap: 8px; }
+.task-proxy-ctrl { display: inline-flex; align-items: center; gap: 4px; }
+.task-proxy-toggle { color: #606266; }
 
 .task-item-meta {
   display: flex;

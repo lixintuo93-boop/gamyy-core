@@ -4,7 +4,6 @@ const { Router } = require('express');
 const { getDb, ok, err } = require('./_helper');
 const RegisterService = require('../../account/RegisterService');
 const AccountCreator  = require('../../account/AccountCreator');
-const { autoAssign }  = require('./proxies');
 const C               = require('../../account/constants');
 
 const router = Router();
@@ -135,10 +134,6 @@ router.post('/submit', async (req, res) => {
           }
           return accountId;
         })();
-        if (savedAccountId) {
-          const fullAccount = db.prepare('SELECT * FROM accounts WHERE id = ?').get(savedAccountId);
-          if (fullAccount) autoAssign(db, fullAccount, false);
-        }
       }
       svc.removeSession(sessionId);
     }

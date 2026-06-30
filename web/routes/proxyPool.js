@@ -152,18 +152,24 @@ router.get('/', (req, res) => {
     if (platform)              { where += ' AND p.platform = ?';    params.push(platform); }
     if (enabled !== undefined) { where += ' AND p.enabled = ?';     params.push(enabled === '1' ? 1 : 0); }
     if (working !== undefined) { where += ' AND p.is_working = ?';  params.push(working === '1' ? 1 : 0); }
-    if (assigned === 'true')   { where += ' AND p.account_id IS NOT NULL'; }
-    if (assigned === 'false')  { where += ' AND p.account_id IS NULL'; }
+    // 方案 C：「已分配」= 被某任务占用（在 task_proxies 中），不再看 account_id
+    if (assigned === 'true')   { where += ' AND EXISTS (SELECT 1 FROM task_proxies tp WHERE tp.proxy_id = p.id)'; }
+    if (assigned === 'false')  { where += ' AND NOT EXISTS (SELECT 1 FROM task_proxies tp WHERE tp.proxy_id = p.id)'; }
     if (proxy_type)            { where += ' AND p.proxy_type = ?'; params.push(proxy_type); }
     else                       { where += " AND p.proxy_type != 'ssh'"; }
 
     const total = db.prepare(`SELECT COUNT(*) AS n FROM proxies p ${where}`).get(...params).n;
+    // 占用任务及其账号通过 task_proxies → tasks → accounts 派生
     const rows  = db.prepare(
-      `SELECT p.*, a.mobile AS account_mobile,
+      `SELECT p.*,
+              (SELECT tp.task_id FROM task_proxies tp WHERE tp.proxy_id = p.id LIMIT 1) AS occupied_task_id,
+              (SELECT t.doctor_code FROM task_proxies tp JOIN tasks t ON t.id = tp.task_id WHERE tp.proxy_id = p.id LIMIT 1) AS occupied_task_doctor,
+              (SELECT t.lock_plan_date FROM task_proxies tp JOIN tasks t ON t.id = tp.task_id WHERE tp.proxy_id = p.id LIMIT 1) AS occupied_task_date,
+              (SELECT a.mobile FROM task_proxies tp JOIN tasks t ON t.id = tp.task_id LEFT JOIN accounts a ON a.id = t.account_id WHERE tp.proxy_id = p.id LIMIT 1) AS account_mobile,
               CASE WHEN EXISTS (
                 SELECT 1 FROM risk_flagged_ips rfi WHERE rfi.ip = p.real_ip OR rfi.ip = p.host
               ) THEN 1 ELSE 0 END AS is_risk_flagged
-       FROM proxies p LEFT JOIN accounts a ON a.id = p.account_id
+       FROM proxies p
        ${where} ORDER BY p.id DESC LIMIT ? OFFSET ?`
     ).all(...params, Number(limit), offset);
 
@@ -198,7 +204,7 @@ router.get('/stats', (req, res) => {
         COUNT(*)                                        AS total,
         SUM(enabled)                                    AS enabled_count,
         SUM(is_working)                                 AS working_count,
-        SUM(CASE WHEN account_id IS NOT NULL THEN 1 ELSE 0 END) AS assigned_count
+        SUM(CASE WHEN EXISTS (SELECT 1 FROM task_proxies tp WHERE tp.proxy_id = proxies.id) THEN 1 ELSE 0 END) AS assigned_count
       FROM proxies ${typeFilter}
     `).get(...params);
     ok(res, r);
@@ -513,7 +519,11 @@ router.post('/batch-ops', (req, res) => {
       for (const id of ids) {
         if (action === 'delete')      db.prepare('DELETE FROM proxies WHERE id = ?').run(id);
         if (action === 'enable')      db.prepare('UPDATE proxies SET enabled = 1, updated_at = ? WHERE id = ?').run(now(), id);
-        if (action === 'disable')     db.prepare('UPDATE proxies SET enabled = 0, account_id = NULL, updated_at = ? WHERE id = ?').run(now(), id);
+        if (action === 'disable') {
+          db.prepare('UPDATE proxies SET enabled = 0, account_id = NULL, updated_at = ? WHERE id = ?').run(now(), id);
+          // 任务禁用 → 从所属任务释放（清快照），使其不再占用任务、回到空闲池
+          db.prepare('DELETE FROM task_proxies WHERE proxy_id = ?').run(id);
+        }
         if (action === 'ops_enable')  db.prepare('UPDATE proxies SET ops_enabled = 1, updated_at = ? WHERE id = ?').run(now(), id);
         if (action === 'ops_disable') {
           const affected = db.prepare('SELECT id FROM accounts WHERE ops_proxy_id = ?').all(id);

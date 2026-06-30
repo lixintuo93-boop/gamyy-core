@@ -56,6 +56,10 @@ function runMigrations(db) {
     if (!taskCols.includes('patient_id')) {
       db.prepare("ALTER TABLE tasks ADD COLUMN patient_id TEXT").run();
     }
+    if (!taskCols.includes('proxy_max_count')) {
+      console.log('📦 迁移: tasks 表添加 proxy_max_count 列（代理改任务级归属）...');
+      db.prepare("ALTER TABLE tasks ADD COLUMN proxy_max_count INTEGER").run();
+    }
   }
 
   db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_account_id ON tasks(account_id)");

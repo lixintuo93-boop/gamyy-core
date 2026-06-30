@@ -50,11 +50,11 @@
         </el-form-item>
         <!-- 心跳超时 / 心跳保活(keepAlive) 已下沉到代理层：见 代理模板 与 账号-代理配置 弹窗 -->
 
-        <!-- ── 账号代理默认值 ── -->
-        <el-divider content-position="left">账号代理</el-divider>
-        <el-form-item label="默认代理数上限">
+        <!-- ── 任务代理默认值 ── -->
+        <el-divider content-position="left">任务代理</el-divider>
+        <el-form-item label="默认代理数">
           <el-input-number v-model="form.default_proxy_max_count" :min="1" :max="200" :step="1" controls-position="right" />
-          <span style="margin-left:10px;color:#909399;font-size:12px">创建账号时及自动分配时的默认上限，单账号可单独覆盖</span>
+          <span style="margin-left:10px;color:#909399;font-size:12px">新建任务时默认从全局空闲池分配的代理数，单任务可单独调整</span>
         </el-form-item>
 
         <!-- ── 云端代理 ── -->

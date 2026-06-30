@@ -2,7 +2,7 @@
 
 const { Router } = require('express');
 const { getDb, ok, err, now } = require('./_helper');
-const { autoAssign, autoAssignOps, getRunningAccountIds } = require('./proxies');
+const { autoAssignOps } = require('./proxies');
 
 const router = Router();
 
@@ -90,19 +90,7 @@ router.put('/:id', (req, res) => {
       proxy_max_count:  b.proxy_max_count ?? null,
       updated_at:       now(),
     });
-    if (b.proxy_max_count != null) {
-      const runningAccs = getRunningAccountIds(db, req.taskRunner);
-      if (runningAccs.has(Number(req.params.id))) return err(res, '该账号有任务正在运行，请先停止后再调整代理上限', 400);
-      const excess = db.prepare(
-        'SELECT id FROM proxies WHERE account_id = ? ORDER BY id ASC LIMIT -1 OFFSET ?'
-      ).all(req.params.id, b.proxy_max_count);
-      if (excess.length > 0) {
-        const release = db.prepare('UPDATE proxies SET account_id = NULL, updated_at = ? WHERE id = ?');
-        db.transaction(() => excess.forEach(p => release.run(now(), p.id)))();
-      }
-      const updatedAccount = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
-      if (updatedAccount.enabled) autoAssign(db, updatedAccount, false);
-    }
+    // 方案 C：代理改为任务级归属，账号级 proxy_max_count 不再触发代理分配。
     ok(res, db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id));
   } catch (e) {
     err(res, e.message, 500);
@@ -115,11 +103,8 @@ router.delete('/:id', (req, res) => {
     const db = getDb();
     if (!db.prepare('SELECT id FROM accounts WHERE id = ?').get(req.params.id)) return err(res, '账号不存在', 404);
 
-    // 释放该账号占用的代理
-    db.prepare('UPDATE proxies SET account_id = NULL, updated_at = ? WHERE account_id = ?')
-      .run(now(), req.params.id);
-    // 解除任务关联
-    db.prepare('UPDATE tasks SET account_id = NULL WHERE account_id = ?').run(req.params.id);
+    // 方案 C：删除该账号下的任务 → task_proxies 经 CASCADE 清理，任务代理自动回到全局空闲池
+    db.prepare('DELETE FROM tasks WHERE account_id = ?').run(req.params.id);
     // 删除账号（子表通过 ON DELETE CASCADE 自动清理）
     db.prepare('DELETE FROM accounts WHERE id = ?').run(req.params.id);
 
@@ -137,12 +122,10 @@ router.patch('/:id/enabled', (req, res) => {
     const enabled = req.body.enabled ? 1 : 0;
     db.prepare('UPDATE accounts SET enabled = ?, updated_at = ? WHERE id = ?').run(enabled, now(), req.params.id);
     if (!enabled) {
-      db.prepare('UPDATE proxies SET account_id = NULL, updated_at = ? WHERE account_id = ?').run(now(), req.params.id);
+      // 禁用账号时清除其操作代理（任务代理改为任务级，不再随账号释放）
       db.prepare('UPDATE accounts SET ops_proxy_id = NULL, updated_at = ? WHERE id = ?').run(now(), req.params.id);
     } else {
       const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
-      const assigned = autoAssign(db, account, false);
-      if (assigned > 0) console.log(`✅ 账号 ${account.mobile} 启用，自动分配 ${assigned} 个任务代理`);
       autoAssignOps(db, account);
     }
     ok(res, db.prepare(`

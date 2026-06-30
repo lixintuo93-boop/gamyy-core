@@ -3,7 +3,6 @@
 const crypto  = require('crypto');
 const { Router } = require('express');
 const { getDb, ok, err, now } = require('./_helper');
-const { autoAssign } = require('./proxies');
 const AccountOperationService = require('../../account/AccountOperationService');
 const AccountCreator          = require('../../account/AccountCreator');
 const { generatePatientInfo } = require('../../account/PatientGenerator');
@@ -111,7 +110,6 @@ router.post('/add-manual', (req, res) => {
           return db.prepare('SELECT * FROM accounts WHERE id = ?').get(accountId);
         })();
 
-        autoAssign(db, account, false);
         results.success++;
         results.accounts.push({ id: account.id, mobile: account.mobile, platform: account.account_platform });
       } catch (e) {
@@ -141,10 +139,6 @@ router.post('/generate', (req, res) => {
 
     const db = getDb();
     const result = AccountCreator.generate(db, accountType, { count: n, platform });
-    for (const acc of result.accounts) {
-      const fullAccount = db.prepare('SELECT * FROM accounts WHERE id = ?').get(acc.id);
-      if (fullAccount) autoAssign(db, fullAccount, false);
-    }
     ok(res, result);
   } catch (e) {
     err(res, e.message, 500);
