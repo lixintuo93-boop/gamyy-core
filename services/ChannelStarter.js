@@ -30,7 +30,8 @@ class ChannelStarter {
     
     this.proxyCheckSchedulers = new Map();
     this.proxyLockSchedulers = new Map();
-    this.proxyFoundCount = new Map();
+    // proxyFoundCount 已移除。改用 SubmitSignPool.countAvailable() 动态查询池中可用数量，
+    // 这样 SubmitSign 被消耗后计数会自动下降，gate 重新打开，支持暂停→恢复查号。
     this.isRunning = false;
 
     this.scheduledService = null;
@@ -315,11 +316,14 @@ class ChannelStarter {
     }
     this.ticketService.notifyStatsUpdate();
 
-    // 如果累计查到票次数已达阈值，不再发送查号请求
+    // 如果池中可用 SubmitSign 数量已达阈值，暂停发送查号请求（释放通道给锁号）
     const _stopCount = pickCheckReq(this.config, scheduler.proxyConfig).stopAfterFoundCount;
-    if (_stopCount > 0 && (this.proxyFoundCount.get(proxyKey) || 0) >= _stopCount) {
-      console.log(`⚠️ [DBG-exec] ${proxyKey}#${requestIndex}: stopAfterFoundCount reached (${_stopCount})`);
-      return;
+    if (_stopCount > 0) {
+      const _available = this.ticketService.submitSignPool.countAvailable(String(accountId), proxyKey);
+      if (_available >= _stopCount) {
+        console.log(`⚠️ [DBG-exec] ${proxyKey}#${requestIndex}: pool has enough SubmitSigns (${_available} >= ${_stopCount}), skip check`);
+        return;
+      }
     }
 
     if (this.ticketService.isAccountLockSuccess(accountId)) {
@@ -374,8 +378,8 @@ class ChannelStarter {
       }
 
       if (result.hasTicket) {
-        const foundCount = (this.proxyFoundCount.get(proxyKey) || 0) + 1;
-        this.proxyFoundCount.set(proxyKey, foundCount);
+        // SubmitSign 已由 TicketService 加入池，查询当前池中可用数量
+        const availableCount = this.ticketService.submitSignPool.countAvailable(String(accountId), proxyKey);
 
         this.triggerLockOnProxy(
           scheduler.proxyConfig, scheduler.account,
@@ -383,8 +387,9 @@ class ChannelStarter {
         );
 
         const stopCount = pickCheckReq(this.config, scheduler.proxyConfig).stopAfterFoundCount;
-        if (stopCount > 0 && foundCount >= stopCount) {
-          this.stopProxyCheckScheduler(proxyKey);
+        if (stopCount > 0 && availableCount >= stopCount) {
+          // 池中已有足够的 SubmitSign，暂停查号调度器（不清除，等消耗后可恢复）
+          this.pauseProxyCheckScheduler(proxyKey);
         }
       } else if (result.targetExhausted) {
         // 🆕 目标医生+日期的所有号源余票均为0，停止查号调度器
@@ -430,9 +435,13 @@ class ChannelStarter {
     // 检查是否启用复用
     if (!reuseConfig || !reuseConfig.enabled) return;
 
-    // 如果累计查到票次数已达阈值，不再复用
+    // 如果池中可用 SubmitSign 已达阈值，不再安排复用（释放通道给锁号）
     const _rcStopCount = checkReq.stopAfterFoundCount;
-    if (_rcStopCount > 0 && (this.proxyFoundCount.get(proxyKey) || 0) >= _rcStopCount) return;
+    if (_rcStopCount > 0) {
+      const accountId = scheduler.account.id || scheduler.account.account_id;
+      const _rcAvailable = this.ticketService.submitSignPool.countAvailable(String(accountId), proxyKey);
+      if (_rcAvailable >= _rcStopCount) return;
+    }
 
     const now = Date.now();
     const windowEndTime = scheduler.windowEndTime;
@@ -474,9 +483,13 @@ class ChannelStarter {
 
     const [host, port] = proxyKey.split(':');
 
-    // 如果累计查到票次数已达阈值，不再安排
+    // 如果池中可用 SubmitSign 已达阈值，不再安排新通道查号（释放通道给锁号）
     const _scStopCount = checkReq.stopAfterFoundCount;
-    if (_scStopCount > 0 && (this.proxyFoundCount.get(proxyKey) || 0) >= _scStopCount) return;
+    if (_scStopCount > 0) {
+      const accountId = scheduler.account.id || scheduler.account.account_id;
+      const _scAvailable = this.ticketService.submitSignPool.countAvailable(String(accountId), proxyKey);
+      if (_scAvailable >= _scStopCount) return;
+    }
     
     const now = Date.now();
     const windowEndTime = scheduler.windowEndTime;
@@ -751,6 +764,10 @@ class ChannelStarter {
               resolvedPoolRecord.id,
               result.lockSuccess ? 'lock_success' : 'changed_error'
             );
+            // SubmitSign 消耗后池中数量下降，尝试恢复查号调度器
+            if (!result.lockSuccess) {
+              this._tryResumeCheckAfterSubmitSignConsumed(proxyKey, accountId);
+            }
           }
         } catch (error) {
           // 直接请求错误静默处理
@@ -798,6 +815,10 @@ class ChannelStarter {
           resolvedPoolRecord.id,
           result.lockSuccess ? 'lock_success' : 'changed_error'
         );
+        // SubmitSign 消耗后池中数量下降，尝试恢复查号调度器
+        if (!result.lockSuccess) {
+          this._tryResumeCheckAfterSubmitSignConsumed(proxyKey, accountId);
+        }
       }
     } catch (error) {
       // 错误静默处理
@@ -812,6 +833,85 @@ class ChannelStarter {
       scheduler.timers = []; // 🆕 清空定时器数组，释放引用
       this.proxyCheckSchedulers.delete(proxyKey);
     }
+  }
+
+  /**
+   * 🆕 暂停查号调度器（保留调度器结构，等 SubmitSign 消耗后可恢复）
+   * 与 stop 的区别：不 delete，保留在 Map 中供 resumeProxyCheckScheduler 恢复
+   */
+  pauseProxyCheckScheduler(proxyKey) {
+    const scheduler = this.proxyCheckSchedulers.get(proxyKey);
+    if (scheduler) {
+      scheduler.isRunning = false;
+      scheduler.timers.forEach(timer => clearTimeout(timer));
+      scheduler.timers = [];
+      // 不 delete！保留调度器以便 SubmitSign 消耗后恢复
+      this.ticketService.printEventLog(
+        `⏸️ [${this.formatTime()}] 代理 ${proxyKey} 查号调度器已暂停（池中 SubmitSign 充足），等待消耗后恢复`
+      );
+    }
+  }
+
+  /**
+   * 🆕 恢复查号调度器（SubmitSign 被消耗导致池中数量不足时调用）
+   * 仅在调度器存在、已暂停、窗口未过期、锁号未成功时有效
+   */
+  resumeProxyCheckScheduler(proxyKey) {
+    const scheduler = this.proxyCheckSchedulers.get(proxyKey);
+    if (!scheduler || scheduler.isRunning) return;
+
+    // 窗口已过期？
+    if (scheduler.windowEndTime && Date.now() >= scheduler.windowEndTime) {
+      // 窗口过期，彻底停止
+      this.stopProxyCheckScheduler(proxyKey);
+      return;
+    }
+
+    const accountId = scheduler.account.id || scheduler.account.account_id;
+
+    // 已锁号成功？
+    if (this.ticketService.isAccountLockSuccess(accountId)) {
+      this.stopProxyCheckScheduler(proxyKey);
+      return;
+    }
+
+    // 池中数量是否确实不足？
+    const stopCount = pickCheckReq(this.config, scheduler.proxyConfig).stopAfterFoundCount;
+    const availableCount = this.ticketService.submitSignPool.countAvailable(String(accountId), proxyKey);
+    if (stopCount > 0 && availableCount >= stopCount) {
+      // 池中仍有足够的 SubmitSign，无需恢复
+      return;
+    }
+
+    // 恢复！
+    scheduler.isRunning = true;
+    this.ticketService.printEventLog(
+      `▶️ [${this.formatTime()}] 代理 ${proxyKey} 查号调度器恢复（池中 ${availableCount} 个 SubmitSign < 阈值 ${stopCount}）`
+    );
+
+    // 找一个可用通道 kick-start 查号循环
+    const availableChannels = this.ticketService.connectionPool.getAvailableChannelsForCheck(proxyKey);
+    if (availableChannels.length > 0) {
+      const channel = availableChannels[0];
+      const immediateRunning = () => this.scheduledService ? this.scheduledService.scheduledRunning : true;
+      // 使用 isReuse=true 避免重复计数 scheduled
+      this.executeProxyCheckRequest(proxyKey, 0, immediateRunning, true, channel);
+    }
+    // 若无可用通道，等 scheduleNewChannelCheck（新通道/心跳恢复）自然触发
+  }
+
+  /**
+   * 🆕 SubmitSign 被消耗后的统一入口：递减计数并尝试恢复查号
+   * 由 executeProxyLockRequest 在 markConsumed 后调用
+   */
+  _tryResumeCheckAfterSubmitSignConsumed(proxyKey, accountId) {
+    // 检查是否有暂停中的查号调度器
+    const scheduler = this.proxyCheckSchedulers.get(proxyKey);
+    if (!scheduler) return;    // 已被彻底停止（如目标售罄），不恢复
+    if (scheduler.isRunning) return;  // 仍在运行，无需恢复
+
+    // 池中 SubmitSign 数量已自然下降，尝试恢复
+    this.resumeProxyCheckScheduler(proxyKey);
   }
 
   stopProxyLockScheduler(proxyKey) {

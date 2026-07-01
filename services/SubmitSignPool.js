@@ -10,6 +10,16 @@ class SubmitSignPool {
   constructor() {
     /** @type {Map<string, SubmitSignRecord>} id -> record */
     this._pool = new Map();
+    /** @type {Function|null} 当 SubmitSign 被消耗时回调 (record) => void */
+    this._onConsumedCb = null;
+  }
+
+  /**
+   * 注册 SubmitSign 消耗回调
+   * @param {Function} cb — (record: SubmitSignRecord) => void
+   */
+  setOnConsumed(cb) {
+    this._onConsumedCb = cb;
   }
 
   /**
@@ -207,6 +217,10 @@ class SubmitSignPool {
     rec.consumed = true;
     rec.consumedAt = Date.now();
     rec.consumedReason = reason;
+    // 通知外部订阅者（用于 ChannelStarter 恢复查号等场景）
+    if (this._onConsumedCb) {
+      try { this._onConsumedCb(rec); } catch (e) { /* 避免回调异常影响主流程 */ }
+    }
   }
 
   /**
@@ -236,6 +250,25 @@ class SubmitSignPool {
     let count = 0;
     for (const rec of this._pool.values()) {
       if (!rec.consumed && now - rec.acquiredAt < SUBMIT_SIGN_TTL_MS) count++;
+    }
+    return count;
+  }
+
+  /**
+   * 统计指定账号+代理的可用（未消耗、未过期）SubmitSign 数量
+   * @param {string} accountId
+   * @param {string} proxyIp — 代理标识（与 add() 时的 proxyIp 字段匹配）
+   * @returns {number}
+   */
+  countAvailable(accountId, proxyIp) {
+    const now = Date.now();
+    let count = 0;
+    for (const rec of this._pool.values()) {
+      if (rec.consumed) continue;
+      if (now - rec.acquiredAt >= SUBMIT_SIGN_TTL_MS) continue;
+      if (rec.accountId !== accountId) continue;
+      if (proxyIp && rec.proxyIp !== proxyIp) continue;
+      count++;
     }
     return count;
   }
